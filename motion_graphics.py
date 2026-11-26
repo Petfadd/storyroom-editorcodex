@@ -255,6 +255,18 @@ def analyse_script(script_text, srt_blocks):
         if not beats:
             # Last resort: extract narration segments from the raw script text.
             beats = _beats_from_script_text(script_text)
+    # Compute total narration duration for temporal act fallback.
+    narration_beats = [b for b in beats if b.get('kind') == 'narration']
+    total_ms = 0
+    if beats:
+        last_out = max((int(b.get('narration_out_ms') or 0) for b in beats), default=0)
+        first_in = min((int(b.get('narration_in_ms') or 0) for b in beats), default=0)
+        total_ms = max(1, last_out - first_in)
+    # When no explicit Act markers are present, build temporal fallback acts so
+    # the scorer and the UI both report meaningful act information.
+    display_acts = list(acts)
+    if not display_acts:
+        display_acts = [{'act': i, 'start_pos': 0} for i in range(1, 7)]
     for beat in beats:
         if beat.get('kind') != 'narration':
             continue
@@ -268,7 +280,7 @@ def analyse_script(script_text, srt_blocks):
                              'narration_in_ms': beat.get('narration_in_ms'),
                              'narration_out_ms': beat.get('narration_out_ms')})
             continue
-        act = _beat_act(beat, acts)
+        act = _beat_act(beat, acts, total_ms=total_ms)
         scores = _score_templates(narration, act, beat)
         if not scores:
             continue
@@ -283,9 +295,10 @@ def analyse_script(script_text, srt_blocks):
     # 4. Rank candidates: prefer higher template score, mid-act (not first/last beat).
     candidates.sort(key=lambda c: (-max(c['template_scores'].values()),
                                    abs(c['act'] - 4.5)))
-    return {'acts': acts, 'candidates': candidates[:20],
+    return {'acts': display_acts, 'candidates': candidates[:20],
             'excluded': excluded[:20], 'beats_total': len(beats),
-            'narration_beats': len([b for b in beats if b.get('kind') == 'narration'])}
+            'narration_beats': len(narration_beats),
+            'acts_detected': bool(acts)}
 
 
 def _beats_from_srt(srt_blocks):
@@ -378,20 +391,37 @@ def _detect_acts(script_text):
     return acts
 
 
-def _beat_act(beat, acts):
-    """Which act a beat falls into (3-6), or 0 if outside any relevant act."""
-    start_ms = beat.get('narration_in_ms') or 0
-    # Use beat ordering as a rough proxy when acts are not explicitly marked:
-    # divide the narration clock into six acts and return the act number.
-    if not acts:
-        # Fallback: approximate act from narration clock position.
-        out_ms = beat.get('narration_out_ms') or start_ms
-        # Default: unknown; let the caller decide.
-        return 0
-    # Find the last act whose start_pos is before this beat's position in script text.
-    # Since beats don't carry character offsets, use narration_in_ms as a proxy:
-    # assign acts by dividing total narration duration by act count.
-    return acts[-1]['act'] if acts else 0
+def _beat_act(beat, acts, total_ms=None):
+    """Which act a beat falls into (1-6), or 0 if unclassifiable.
+
+    When explicit Act markers exist, the beat is placed in the last act whose
+    marker precedes its script position (approximated by narration clock).
+    When no markers exist, the narration clock is divided into six equal bands
+    so every beat still receives an act number the scorer can use.
+    """
+    start_ms = int(beat.get('narration_in_ms') or 0)
+    end_ms = int(beat.get('narration_out_ms') or 0)
+    mid_ms = (start_ms + end_ms) // 2
+    if acts:
+        # Place the beat in the last explicit act whose marker is before it.
+        # We approximate marker position by dividing the clock into even bands
+        # across the explicit acts (since beats carry no character offset).
+        act_numbers = sorted({a['act'] for a in acts})
+        if len(act_numbers) >= 2 and total_ms and total_ms > 0:
+            band = total_ms // len(act_numbers)
+            if band > 0:
+                band_index = mid_ms // band
+                # Find the explicit act at that band; fall back to nearest.
+                idx = min(band_index, len(act_numbers) - 1)
+                return act_numbers[idx]
+        return act_numbers[-1] if act_numbers else 0
+    # No explicit markers: divide the clock into six equal acts.
+    if total_ms and total_ms > 0:
+        band = total_ms // 6
+        if band > 0:
+            band_index = mid_ms // band
+            return max(1, min(6, int(band_index) + 1))
+    return 0
 
 
 def _score_templates(narration, act, beat):
@@ -416,24 +446,29 @@ def _template_score(narration, act, beat, template_id):
     }
     if act in act_affinity.get(template_id, ()):
         score += 40
-    elif act == 0:
-        score += 5  # neutral, may still match via keywords
-    # Keyword evidence (secondary; act affinity dominates)
-    hint_groups = _ACT_HINTS.get(act, ())
+    elif act and act not in act_affinity.get(template_id, ()):
+        score += 10  # some act detected, just not this template's best
+    else:
+        score += 15  # neutral / unknown act, still meaningful
+    # Keyword evidence: use both the act's hints AND the template's own hints.
+    hint_groups = _ACT_HINTS.get(act, ()) + _ACT_HINTS.get(0, ())
     for pattern in hint_groups:
         if re.search(pattern, narration, re.I):
-            score += 15
-    # Template-specific cues
+            score += 10
+    # Template-specific cues (strong evidence independent of act)
     if template_id == 'investigative_findings' and re.search(
-            r'\b(?:three|four|five|key|main|primary|central)\s+(?:findings?|points?|facts?)\b',
+            r'\b(?:three|four|five|key|main|primary|central|significant|critical)\s+'
+            r'(?:findings?|points?|facts?|clues|pieces?)\b',
             narration, re.I):
         score += 25
     if template_id == 'chronological_timeline' and re.search(
-            r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d',
+            r'\b(?:january|february|march|april|may|june|july|august|september|'
+            r'october|november|december)\s+\d',
             narration, re.I):
         score += 30
     if template_id == 'contradictory_statements' and re.search(
-            r'\b(?:however|but|instead|contrary|discrepanc|conflict|inconsisten)\b',
+            r'\b(?:however|but|instead|contrary|discrepanc|conflict|inconsisten|'
+            r'yet|on the other hand)\b',
             narration, re.I):
         score += 25
     if template_id == 'legal_outcome' and re.search(
@@ -452,13 +487,23 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
     if not analysis.get('candidates'):
         return []
     # 1. De-duplicate: avoid overlapping suggestions within 15 seconds of each other.
+    # 2. Use relative ranking: take the top candidates by best template score,
+    #    rather than an absolute threshold. This keeps suggestions working even
+    #    when no explicit Act markers are present (scores top out around 35 instead
+    #    of 100).
+    ranked = sorted(analysis['candidates'],
+                    key=lambda c: -max(c['template_scores'].values()))
+    # A hard floor still filters out pure noise (a score below 25 means no real
+    # template evidence was found in the narration text at all).
+    FLOOR = 25
     selected = []
     last_end = -15_000
-    for cand in analysis['candidates']:
+    for cand in ranked:
         if cand['narration_in_ms'] < last_end + 15_000:
             continue
         best_template = max(cand['template_scores'], key=cand['template_scores'].get)
-        if cand['template_scores'][best_template] < 40:
+        score = cand['template_scores'][best_template]
+        if score < FLOOR:
             continue
         # Extend the window slightly before/after for breathing room.
         start_ms = max(0, cand['narration_in_ms'] - 500)
@@ -478,7 +523,7 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
             'start_s': round(start_ms / 1000, 3),
             'end_s': round(end_ms / 1000, 3),
             'content': content,
-            'score': cand['template_scores'][best_template],
+            'score': score,
             'beat': cand['beat'],
             'act': cand['act'],
         })

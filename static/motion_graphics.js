@@ -217,7 +217,10 @@
   function _renderSuggestions(suggestions) {
     const box = document.getElementById('mg-suggestions-box');
     if (!box) return;
-    if (!suggestions.length) { box.innerHTML = ''; return; }
+    if (!suggestions.length) {
+      box.innerHTML = '<div class="mg-status">No suggestions matched this project. Try adding manually or adjusting the script.</div>';
+      return;
+    }
     box.innerHTML = `
       <h3 style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#aab4c2;margin:14px 0 8px">Suggestions (${suggestions.length})</h3>
       ${suggestions.map(sug => {
@@ -246,12 +249,15 @@
     const analysis = _state.analysis;
     if (!analysis) { box.innerHTML = ''; return; }
     const s = analysis.summary || {};
+    const actsLabel = s.acts && s.acts.length
+      ? (s.acts_detected !== false ? s.acts.join(', ') : 'Temporal (6 acts)')
+      : 'Temporal (6 acts)';
     box.innerHTML = `
       <div class="mg-analysis">
         <b>${s.narration_beats || 0}</b> narration beats ·
         <b>${s.candidates || 0}</b> candidates ·
         <b>${s.excluded || 0}</b> excluded ·
-        Acts: ${(s.acts || []).join(', ') || '—'} ·
+        Acts: ${actsLabel} ·
         Signature: <code>${_state.signature || ''}</code>
       </div>`;
   }
