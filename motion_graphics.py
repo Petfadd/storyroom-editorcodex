@@ -809,19 +809,26 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
     For each template, picks the BEST candidate (highest per-template score),
     not the first one that happens to have a non-zero score. Templates whose
     best candidate scores below MIN_TEMPLATE_SCORE are skipped.
+
+    MIN_TEMPLATE_SCORE is set very low (10) because real documentary narration
+    is often terse — blocks of 5-15 words are common, and a single concrete
+    detail (one date, one enumerated finding, one contrast marker) is enough
+    signal to warrant surfacing. The user judges each recommendation via
+    Preview / Approve / Reject. Volume is controlled by:
+      - max 12 recommendations per film (LIMITS['max_per_film'])
+      - 20s minimum spacing between adjacent recommendations
+      - diversity constraint (each template used at most once)
     """
     candidates = analysis.get('candidates') or []
     if not candidates:
         return []
 
-    # Minimum per-template score to warrant a recommendation. Lower than this
-    # means the block has only weak keyword matches and does not genuinely
-    # benefit from a motion graphic.
-    MIN_TEMPLATE_SCORE = 30
+    MIN_TEMPLATE_SCORE = 10
 
     # Pass 1: pick the BEST candidate for each template independently.
     picked = []
     seen_indices = set()
+    seen_templates = set()
     for template_id in TEMPLATES:
         best_for_t = None
         best_score = 0
@@ -833,10 +840,13 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
         if best_for_t and best_score >= MIN_TEMPLATE_SCORE:
             picked.append((template_id, best_for_t, best_score))
             seen_indices.add(best_for_t['index'])
+            seen_templates.add(template_id)
 
-    # Pass 2: fill remaining slots with the best-of-rest (any template).
-    # Ensures we get 2-5 diverse recommendations even when one template has
-    # no strong candidates.
+    # Pass 2: fill remaining templates with lower threshold, to ensure
+    # diversity. A documentary usually has several distinct story beats
+    # (findings, timeline, contradiction, legal) and we want each one
+    # represented even if the signal is modest.
+    FLOOR_DIVERSITY = 10
     for cand in candidates:
         if len(picked) >= LIMITS['max_per_film']:
             break
@@ -844,9 +854,15 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
             continue
         best_t = cand.get('best_template')
         best_s = cand.get('best_score', 0)
-        if not best_t or best_s < MIN_TEMPLATE_SCORE:
+        if not best_t:
+            continue
+        # Only consider templates not yet represented.
+        if best_t in seen_templates:
+            continue
+        if best_s < FLOOR_DIVERSITY:
             continue
         picked.append((best_t, cand, best_s))
+        seen_templates.add(best_t)
         seen_indices.add(cand['index'])
 
     # Sort picked chronologically, then space them out by min_spacing_s.
@@ -879,6 +895,44 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
             'reveal_timings': reveal_timings,
         })
         last_end = end_s * 1000
+
+    # Fallback: if no recommendations were produced but candidates exist,
+    # surface the top 2 candidates at any score with relaxed spacing. The
+    # user can reject weak ones via the UI.
+    if not selected and candidates:
+        fallback = []
+        last_end_fb = -10_000
+        for cand in candidates:
+            if len(fallback) >= 2:
+                break
+            if cand['start_ms'] < last_end_fb + 10_000:
+                continue
+            best_t = cand.get('best_template')
+            if not best_t:
+                continue
+            start_s = max(0.0, cand['start_ms'] / 1000 - 0.5)
+            end_ms = cand['end_ms'] + 1500
+            duration_s = max(LIMITS['min_duration_s'],
+                             min(LIMITS['max_duration_s'], (end_ms - cand['start_ms']) / 1000))
+            end_s = start_s + duration_s
+            content = _propose_content(best_t, cand['text'])
+            reveal_timings = _compute_reveal_timings(best_t, content, duration_s)
+            reason = _build_reason(best_t, cand)
+            fallback.append({
+                'id': 'mg_' + hashlib.sha256(
+                    f"{cand['index']}|{best_t}|{cand['start_ms']}".encode()).hexdigest()[:12],
+                'template': best_t,
+                'start_s': round(start_s, 3),
+                'end_s': round(end_s, 3),
+                'content': content,
+                'score': cand.get('best_score', 0),
+                'information_density': cand.get('information_density', 0),
+                'reason': reason,
+                'narration_passage': cand['text'],
+                'reveal_timings': reveal_timings,
+            })
+            last_end_fb = end_s * 1000
+        return fallback
 
     return selected
 
