@@ -4,7 +4,7 @@
  * Adds a Motion button + dialog to the editor. The dialog:
  *   - shows enable/disable and auto/manual mode
  *   - runs context analysis on demand
- *   - presents ranked suggestions with one-click accept
+ *   - presents ranked recommendations with full details
  *   - previews each sequence (rendered video) with playback/seeking
  *   - lets the user edit heading/body text, accept, reject or remove
  *   - never modifies narration, footage, SRT or timestamps
@@ -24,20 +24,14 @@
   let _selectedId = null;
 
   function _pid() {
-    // Use the global project object P if available (like all other Storyroom modules)
-    if (typeof P !== 'undefined' && P && P.id) {
-      return P.id;
-    }
-    // Fallback: extract from URL pattern /editor/{pid}
+    if (typeof P !== 'undefined' && P && P.id) return P.id;
     const m = (location.pathname || '').match(/\/editor\/([a-f0-9]{16})/);
     return m ? m[1] : null;
   }
 
   function _url(suffix) {
     const pid = _pid();
-    if (!pid) {
-      throw new Error('No project ID available. Please open a project first.');
-    }
+    if (!pid) throw new Error('No project ID available. Please open a project first.');
     return '/api/projects/' + pid + '/motion-graphics' + (suffix || '');
   }
 
@@ -53,7 +47,6 @@
   // ---------- open / close ----------
 
   window.openMotionGraphics = async function openMotionGraphics() {
-    // Must have an active project (matches cinematic_graphics guard pattern).
     if (!P || !P.id) {
       const dialog = document.getElementById('motion-graphics-dialog');
       if (dialog) {
@@ -120,7 +113,7 @@
             <button class="button secondary" id="mg-add-manual">Add manually</button>
           </div>
           <div id="mg-analysis-box"></div>
-          <div id="mg-suggestions-box"></div>
+          <div id="mg-recommended-box"></div>
           <h3 style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#aab4c2;margin:14px 0 8px">Approved sequences (${seqs.length})</h3>
           <div id="mg-sequences-box"></div>` : '<div class="mg-status">Motion graphics are disabled. Enable to begin.</div>'}
         </div>
@@ -162,7 +155,6 @@
         </div>
       </div>`;
 
-    // Wire up events
     const en = document.getElementById('mg-enabled');
     if (en) en.addEventListener('change', () => _patch({ enabled: en.checked }));
     const mo = document.getElementById('mg-mode');
@@ -174,13 +166,103 @@
     const sd = document.getElementById('mg-save-design');
     if (sd) sd.addEventListener('click', _saveDesign);
 
-    // Render approved sequences
     if (enabled) {
       _renderSequences(seqs);
       _renderAnalysis();
-      _renderSuggestions(suggestions);
+      _renderRecommended(suggestions);
     }
   }
+
+  // ---------- Recommended Sequences ----------
+
+  function _renderRecommended(suggestions) {
+    const box = document.getElementById('mg-recommended-box');
+    if (!box) return;
+    if (!suggestions.length) {
+      const hasCandidates = _state.analysis && (_state.analysis.candidates || []).length > 0;
+      box.innerHTML = `
+        <h3 style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#aab4c2;margin:14px 0 8px">Recommended sequences (0)</h3>
+        <div class="mg-status">
+          ${hasCandidates
+            ? 'Analysis found candidates but none met the threshold for a recommendation. This usually means the narration does not contain strong template signals (enumerated findings, multiple dates, explicit contradictions, or legal terminology). Try adding a sequence manually.'
+            : 'No candidates detected. Import your narration SRT and production script, then click "Analyse documentary".'}
+        </div>`;
+      return;
+    }
+    box.innerHTML = `
+      <h3 style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#aab4c2;margin:14px 0 8px">Recommended sequences (${suggestions.length})</h3>
+      ${suggestions.map(sug => _renderRecommendationCard(sug)).join('')}`;
+    box.querySelectorAll('button[data-act]').forEach(btn => {
+      btn.addEventListener('click', () => _recAction(btn.dataset.act, btn.dataset.id));
+    });
+  }
+
+  function _renderRecommendationCard(sug) {
+    const content = sug.content || {};
+    const title = content.title || content.kicker || TEMPLATES[sug.template] || sug.template;
+    const dur = (sug.end_s - sug.start_s).toFixed(1);
+    const passage = sug.narration_passage || '';
+    const reason = sug.reason || '';
+    const revealTimings = sug.reveal_timings || {};
+    const elements = revealTimings.elements || [];
+
+    // Build body description based on template
+    let bodyDesc = '';
+    if (sug.template === 'investigative_findings' && content.findings) {
+      bodyDesc = content.findings.map((f, i) => {
+        const el = elements.find(e => e.id === `finding_${i}`);
+        const t = el ? ` @ ${el.at_s.toFixed(1)}s` : '';
+        return `<div class="mg-rec-finding">• ${_escape(f)}<small>${t}</small></div>`;
+      }).join('');
+    } else if (sug.template === 'chronological_timeline' && content.events) {
+      bodyDesc = content.events.map((e, i) => {
+        const el = elements.find(ev => ev.id === `event_${i}_date`);
+        const t = el ? ` @ ${el.at_s.toFixed(1)}s` : '';
+        return `<div class="mg-rec-event"><b>${_escape(e.date)}</b>${t} — ${_escape(e.event)}</div>`;
+      }).join('');
+    } else if (sug.template === 'contradictory_statements') {
+      bodyDesc = `
+        <div class="mg-rec-verified"><b>Verified:</b> ${_escape(content.verified || '')}</div>
+        <div class="mg-rec-conflicting"><b>Conflicting:</b> ${_escape(content.conflicting || '')}</div>`;
+    } else if (sug.template === 'legal_outcome') {
+      bodyDesc = `
+        ${content.court ? `<div class="mg-rec-court">${_escape(content.court)}</div>` : ''}
+        ${(content.charges || []).map(c => `<div class="mg-rec-charge">• ${_escape(c)}</div>`).join('')}
+        ${content.verdict ? `<div class="mg-rec-verdict"><b>Verdict:</b> ${_escape(content.verdict)}</div>` : ''}
+        ${content.sentencing ? `<div class="mg-rec-sentence"><b>Sentencing:</b> ${_escape(content.sentencing)}</div>` : ''}`;
+    }
+
+    return `
+      <div class="mg-recommendation" data-id="${sug.id}">
+        <div class="mg-rec-header">
+          <span class="mg-rec-template">${TEMPLATES[sug.template] || sug.template}</span>
+          <span class="mg-rec-time">${_formatTime(sug.start_s)} – ${_formatTime(sug.end_s)} (${dur}s)</span>
+          <span class="mg-rec-score">score ${sug.score}</span>
+        </div>
+        <div class="mg-rec-passage">
+          <small>Narration passage</small>
+          <p>${_escape(passage)}</p>
+        </div>
+        <div class="mg-rec-heading">
+          <small>Proposed heading</small>
+          <b>${_escape(title)}</b>
+        </div>
+        <div class="mg-rec-body">${bodyDesc}</div>
+        <div class="mg-rec-reason">
+          <small>Why this animation</small>
+          <p>${_escape(reason)}</p>
+        </div>
+        <div class="mg-rec-actions">
+          <button data-act="preview" data-id="${sug.id}">▶ Preview</button>
+          <button class="primary" data-act="accept" data-id="${sug.id}">✓ Approve</button>
+          <button data-act="edit" data-id="${sug.id}">✎ Edit</button>
+          <button class="danger" data-act="reject" data-id="${sug.id}">✗ Reject</button>
+          <button data-act="regenerate" data-id="${sug.id}">↻ Regenerate</button>
+        </div>
+      </div>`;
+  }
+
+  // ---------- Approved sequences ----------
 
   function _renderSequences(seqs) {
     const box = document.getElementById('mg-sequences-box');
@@ -194,7 +276,7 @@
       const title = content.title || content.kicker || TEMPLATES[seq.template] || seq.template;
       const bodyText = content.findings ? content.findings.join(' · ') :
                        content.events ? content.events.map(e => e.date + ': ' + e.event).join(' · ') :
-                       content.verified || content.charges && content.charges.join(', ') || '';
+                       content.verified || (content.charges && content.charges.join(', ')) || '';
       const dur = (seq.end_s - seq.start_s).toFixed(1);
       const active = seq.id === _selectedId ? ' active' : '';
       return `
@@ -214,34 +296,7 @@
     });
   }
 
-  function _renderSuggestions(suggestions) {
-    const box = document.getElementById('mg-suggestions-box');
-    if (!box) return;
-    if (!suggestions.length) {
-      box.innerHTML = '<div class="mg-status">No suggestions matched this project. Try adding manually or adjusting the script.</div>';
-      return;
-    }
-    box.innerHTML = `
-      <h3 style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#aab4c2;margin:14px 0 8px">Suggestions (${suggestions.length})</h3>
-      ${suggestions.map(sug => {
-        const content = sug.content || {};
-        const title = content.title || content.kicker || TEMPLATES[sug.template] || sug.template;
-        const dur = (sug.end_s - sug.start_s).toFixed(1);
-        return `
-          <div class="mg-sequence" data-id="${sug.id}">
-            <small>${TEMPLATES[sug.template] || sug.template} · ${_formatTime(sug.start_s)} – ${_formatTime(sug.end_s)} (${dur}s) · score ${sug.score}</small>
-            <h4>${_escape(title)}</h4>
-            <div class="mg-seq-actions">
-              <button class="primary" data-act="accept" data-id="${sug.id}">Accept</button>
-              <button data-act="preview" data-id="${sug.id}">Preview</button>
-              <button data-act="reject" data-id="${sug.id}">Reject</button>
-            </div>
-          </div>`;
-      }).join('')}`;
-    box.querySelectorAll('button[data-act]').forEach(btn => {
-      btn.addEventListener('click', () => _sugAction(btn.dataset.act, btn.dataset.id));
-    });
-  }
+  // ---------- Analysis summary ----------
 
   function _renderAnalysis() {
     const box = document.getElementById('mg-analysis-box');
@@ -249,15 +304,11 @@
     const analysis = _state.analysis;
     if (!analysis) { box.innerHTML = ''; return; }
     const s = analysis.summary || {};
-    const actsLabel = s.acts && s.acts.length
-      ? (s.acts_detected !== false ? s.acts.join(', ') : 'Temporal (6 acts)')
-      : 'Temporal (6 acts)';
     box.innerHTML = `
       <div class="mg-analysis">
-        <b>${s.narration_beats || 0}</b> narration beats ·
+        <b>${s.narration_blocks || s.narration_beats || 0}</b> narration blocks ·
         <b>${s.candidates || 0}</b> candidates ·
         <b>${s.excluded || 0}</b> excluded ·
-        Acts: ${actsLabel} ·
         Signature: <code>${_state.signature || ''}</code>
       </div>`;
   }
@@ -287,34 +338,62 @@
     }
   }
 
-  async function _seqAction(act, id) {
+  function _recAction(act, id) {
+    const suggestions = _state.settings.suggestions || [];
+    const seq = suggestions.find(s => s.id === id);
+    if (!seq) return;
+    if (act === 'preview') return _previewSequence(id, suggestions);
+    if (act === 'accept') {
+      const accepted = { ...seq };
+      delete accepted.score; delete accepted.beat; delete accepted.act;
+      delete accepted.information_density; delete accepted.narration_passage;
+      delete accepted.reveal_timings;
+      const current = _state.settings.sequences || [];
+      return _patch({ sequences: current.concat([accepted]) });
+    }
+    if (act === 'reject') {
+      return _patch({ suggestions: suggestions.filter(s => s.id !== id) });
+    }
+    if (act === 'edit') {
+      const newTitle = prompt('Edit heading:', seq.content.title || seq.content.kicker || '');
+      if (newTitle === null) return;
+      const updated = suggestions.map(s => {
+        if (s.id !== id) return s;
+        const copy = JSON.parse(JSON.stringify(s));
+        if (copy.content.title !== undefined) copy.content.title = newTitle;
+        if (copy.content.kicker !== undefined) copy.content.kicker = newTitle;
+        return copy;
+      });
+      return _patch({ suggestions: updated });
+    }
+    if (act === 'regenerate') {
+      // Re-analyse to refresh suggestions
+      return _analyse();
+    }
+  }
+
+  function _seqAction(act, id) {
     if (act === 'preview') return _previewSequence(id);
     if (act === 'remove') {
       if (!confirm('Remove this motion graphics sequence? Original footage is preserved.')) return;
       const seqs = (_state.settings.sequences || []).filter(s => s.id !== id);
-      await _patch({ sequences: seqs });
-      if (_selectedId === id) _selectedId = null;
-      return;
+      return _patch({ sequences: seqs });
     }
-    if (act === 'edit') return _editSequence(id);
-  }
-
-  async function _sugAction(act, id) {
-    const suggestions = _state.settings.suggestions || [];
-    const seq = suggestions.find(s => s.id === id);
-    if (!seq) return;
-    if (act === 'accept') {
-      const accepted = { ...seq };
-      delete accepted.score; delete accepted.beat; delete accepted.act;
-      const current = _state.settings.sequences || [];
-      await _patch({ sequences: current.concat([accepted]) });
-      return;
+    if (act === 'edit') {
+      const seq = (_state.settings.sequences || []).find(s => s.id === id);
+      if (!seq) return;
+      const content = seq.content || {};
+      const newTitle = prompt('Edit title:', content.title || content.kicker || '');
+      if (newTitle === null) return;
+      const seqs = (_state.settings.sequences || []).map(s => {
+        if (s.id !== id) return s;
+        const copy = JSON.parse(JSON.stringify(s));
+        if (copy.content.title !== undefined) copy.content.title = newTitle;
+        if (copy.content.kicker !== undefined) copy.content.kicker = newTitle;
+        return copy;
+      });
+      return _patch({ sequences: seqs });
     }
-    if (act === 'reject') {
-      await _patch({ suggestions: suggestions.filter(s => s.id !== id) });
-      return;
-    }
-    if (act === 'preview') return _previewSequence(id, suggestions);
   }
 
   async function _previewSequence(id, pool) {
@@ -352,22 +431,6 @@
     if (empty) { empty.textContent = 'Rendering preview…'; empty.style.display = 'flex'; }
     video.style.display = 'none';
     tick();
-  }
-
-  function _editSequence(id) {
-    const seq = (_state.settings.sequences || []).find(s => s.id === id);
-    if (!seq) return;
-    const content = seq.content || {};
-    const newTitle = prompt('Edit title:', content.title || content.kicker || '');
-    if (newTitle === null) return;
-    const seqs = (_state.settings.sequences || []).map(s => {
-      if (s.id !== id) return s;
-      const copy = JSON.parse(JSON.stringify(s));
-      if (copy.content.title !== undefined) copy.content.title = newTitle;
-      if (copy.content.kicker !== undefined) copy.content.kicker = newTitle;
-      return copy;
-    });
-    _patch({ sequences: seqs });
   }
 
   function _addManual() {
