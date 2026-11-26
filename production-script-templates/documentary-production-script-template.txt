@@ -1,0 +1,59 @@
+STORYROOM DOCUMENTARY PRODUCTION SCRIPT — GUIDE
+================================================
+
+A production script is a list of Beats, one after another, separated by a blank
+line. Each Beat is either VOICE OVER (narration over footage) or DOCUMENTARY SOUND
+BITE (a real person speaking, with the narration paused). Upload it in
+Setup > 01 Production script, together with the narration audio and its SRT.
+
+All times are HH:MM:SS,mmm (for example 00:01:05,250).
+The worked example in this folder (Worked_Example_Production_Script.txt) is a
+complete, valid script you can upload to see the format working.
+
+1. VOICE OVER beat — the fields, in order
+-----------------------------------------
+  Beat:              a number, 001, 002 ...
+  Type:              VOICE OVER
+  Master timeline:   start --> end on the finished film clock
+  Narration Clock:   start --> end of the narration (first beat), or
+                     RESUMES at start --> end (after a sound bite)
+  Narration State:   PLAYING (first beat) or RESUMING
+  Full source:       the footage filename, e.g. S01.mp4
+  Source IN / OUT:   the part of that file to show (same length as the beat)
+  Footage Audio:     MUTED (0%)
+  Spoken Narration:  the narrator's words for this beat (recommended: transitions,
+                     photo motion and the CTA read these words)
+  Visual Direction:  what the picture should show
+  Continuity note:   anything to keep consistent
+  On-screen Caption: optional text label
+  Cut Action:        optional transition INTO this beat: CUT, DISSOLVE, DIP TO
+                     BLACK, QUICK FADE, WHIP PAN, SLIDE ... or AUTO
+
+2. DOCUMENTARY SOUND BITE beat
+------------------------------
+  Type:              DOCUMENTARY SOUND BITE
+  Master timeline:   start --> end (Duration: N sec)
+  Narration Clock:   PAUSED at the narration time where it stops
+  Narration State:   PAUSED (Suspended at that time)
+  Full source:       the interview filename
+  Source IN / OUT:   the exact words to play
+  Footage Audio:     UNMUTED (100% Dialogue Level, Clean)
+  Speaker:           who is speaking
+  Exact Spoken Dialogue: their words
+
+3. Photographs
+--------------
+  Name the image file in Full source (for example P01_Malia.jpg) and write
+  Treatment: PHOTO with Source IN: N/A and Source OUT: N/A.
+
+4. Footage sheet
+----------------
+  Footage_Sheet_Template.md lists each source with its link. Upload it in
+  Setup > 06 Footage & Photo Importer to download the files with the right names.
+
+5. Rules that keep the edit in sync
+-----------------------------------
+  * The narration clock never jumps: each VOICE OVER continues from the last.
+  * A sound bite pauses the narration; the next beat RESUMES at the same time.
+  * Source OUT minus Source IN equals the beat length.
+  * Every filename in the script must be uploaded with exactly that name.

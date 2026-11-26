@@ -1,0 +1,30 @@
+Flask>=3.0,<4
+imageio-ffmpeg>=0.5,<1
+# The headless build is required, not preferred: the app never opens a window, and the
+# GUI build needs a display library that a server, or a session without one, does not
+# provide. scenedetect (below) declares a dependency on the *GUI* `opencv-python`, so pip
+# installs it alongside this one; both then own the same `cv2` package, the GUI one wins,
+# and `import cv2` fails with a missing libGL.so.1 -- which stops the editor from starting
+# at all, not just from detecting scenes. `requirements-constraints.txt` is what prevents
+# that, and it is passed automatically by the commands in the README.
+opencv-python-headless>=4.8,<5
+Pillow>=10,<14
+
+av>=12,<19
+
+# CPU, memory, disk and load readings, and therefore every decision about how many
+# heavy jobs may run, when to hold back, and whether a large operation fits. Without it
+# the app still runs, but the queue cannot see the machine it is managing, so the
+# performance controls degrade to doing nothing. That is not an acceptable default for
+# a feature whose whole point is resource management.
+psutil>=5.9,<8
+
+# Subject-aware reframing. scenedetect is BSD-3-Clause and is used to find scene
+# boundaries, so a crop is never carried across a cut. If it is missing the analyser
+# falls back to its own frame-difference pass and still works.
+scenedetect>=0.6,<0.8
+
+# YouTube Footage Importer. The app can also install this itself into .cache/yt-dlp
+# ("Install yt-dlp" in Setup). Keep it current: YouTube changes often, and an old
+# yt-dlp is the usual reason a download that used to work starts failing.
+yt-dlp>=2024.1

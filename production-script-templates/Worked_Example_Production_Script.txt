@@ -1,0 +1,85 @@
+Beat: 001
+Type: VOICE OVER
+Master timeline: 00:00:00,000 --> 00:00:04,000
+Narration Clock: 00:00:00,000 --> 00:00:04,000
+Narration State: PLAYING
+Full source: S01.mp4
+Source IN: 00:00:10,000
+Source OUT: 00:00:14,000
+Footage Audio: MUTED (0%)
+Spoken Narration: Malia Bass was two years old.
+Visual Direction: Exterior, establishing.
+Continuity note: Keep the same location orientation.
+On-screen Caption: 
+
+Beat: 002
+Type: VOICE OVER
+Master timeline: 00:00:04,000 --> 00:00:08,000
+Narration Clock: RESUMES at 00:00:04,000 --> 00:00:08,000
+Narration State: RESUMING
+Full source: S02.mp4
+Source IN: 00:00:02,000
+Source OUT: 00:00:06,000
+Footage Audio: MUTED (0%)
+Spoken Narration: On the night of March 3rd, she vanished from her bedroom.
+Visual Direction: Exterior, establishing.
+Continuity note: Keep the same location orientation.
+On-screen Caption: 
+
+Beat: 003
+Type: DOCUMENTARY SOUND BITE
+Master timeline: 00:00:08,000 --> 00:00:13,000 (Duration: 5 sec)
+Narration Clock: PAUSED at 00:00:08,000
+Narration State: PAUSED (Suspended at 00:00:08,000)
+Full source: S03.mp4
+Source IN: 00:00:30,000
+Source OUT: 00:00:35,000
+Footage Audio: UNMUTED (100% Dialogue Level, Clean)
+Speaker: Detective Ray Holt
+Exact Spoken Dialogue: We searched every inch of that river.
+Continuity note: Anchor ID: A3
+Visual Direction: Interview, medium close-up.
+On-screen Caption: Detective Ray Holt
+
+Beat: 004
+Type: VOICE OVER
+Master timeline: 00:00:13,000 --> 00:00:17,000
+Narration Clock: RESUMES at 00:00:08,000 --> 00:00:12,000
+Narration State: RESUMING
+Full source: S01.mp4
+Source IN: 00:00:40,000
+Source OUT: 00:00:44,000
+Footage Audio: MUTED (0%)
+Spoken Narration: But a neighbour had seen something.
+Visual Direction: Exterior, establishing.
+Continuity note: Keep the same location orientation.
+On-screen Caption: 
+
+Beat: 005
+Type: VOICE OVER
+Master timeline: 00:00:17,000 --> 00:00:21,000
+Narration Clock: RESUMES at 00:00:12,000 --> 00:00:16,000
+Narration State: RESUMING
+Full source: S04.mp4
+Source IN: 00:00:05,000
+Source OUT: 00:00:09,000
+Footage Audio: MUTED (0%)
+Spoken Narration: Years later, the case was reopened.
+Visual Direction: Exterior, establishing.
+Continuity note: Keep the same location orientation.
+On-screen Caption: 
+Cut Action: DIP TO BLACK
+
+Beat: 006
+Type: VOICE OVER
+Master timeline: 00:00:21,000 --> 00:00:25,000
+Narration Clock: RESUMES at 00:00:16,000 --> 00:00:20,000
+Narration State: RESUMING
+Full source: S02.mp4
+Source IN: 00:00:30,000
+Source OUT: 00:00:34,000
+Footage Audio: MUTED (0%)
+Spoken Narration: If you value these stories, subscribe and turn on notifications.
+Visual Direction: Exterior, establishing.
+Continuity note: Keep the same location orientation.
+On-screen Caption: 

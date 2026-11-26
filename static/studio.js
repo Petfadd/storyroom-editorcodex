@@ -1,0 +1,416 @@
+const $=s=>document.querySelector(s),E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let projects=[],P=null,tab='brief',sceneIndex=0,dirty=false,uploading=false,PROFILES={};
+let list, showHome, openProject, changeTab, renderProject, selectScene;
+async function api(url,method='GET',data){const opts={method};if(data instanceof FormData)opts.body=data;else if(data!==undefined){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(data)}const r=await fetch(url,opts);let d;try{d=await r.json()}catch{throw Error('The server response could not be read. Please retry.')}if(!r.ok&&d?.missing_dependency&&typeof checkDependencies==='function')checkDependencies();if(!r.ok)throw Error(d.error||d.errors?.slice(0,3).join(' ')||'The request could not finish.');syncRenderState(d);return d}
+// Any save that returns the project also says whether the last MP4 still matches it.
+// Keep the Render / Download button honest without waiting for a reload.
+function syncRenderState(d){try{if(typeof P==='undefined'||!P||!d||typeof d!=='object'||d===P||d.id!==P.id||!d.render||d.updated===undefined)return;P.render=d.render;P.updated=d.updated;if(typeof renderExport==='function')queueMicrotask(()=>{try{renderExport()}catch{}})}catch{}}
+function toast(s){$('#toast').textContent=s;$('#toast').classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5000)}
+window.addEventListener('unhandledrejection',e=>{e.preventDefault();toast(e.reason?.message||'The operation could not finish.')});
+function leave(){if(uploading){toast('Please wait for the import to finish.');return false}if(dirty&&!confirm('You have unsaved changes. Leave without saving?'))return false;dirty=false;return true}
+function newProduction(){if(!leave())return;$('#new-form').reset();$('#new-dialog').showModal()}
+function footageRequirementsHTML(){
+ const r=P?.footage_requirements;
+ if(!P?.production_script||r?.status==='no_script')return '<div class="notice"><strong>Footage count</strong><p>Upload the production script first to see the video filenames it mentions.</p></div>';
+ if(!r||r.status!=='found')return '<div class="notice warn"><strong>Footage count not found</strong><p>No explicit MP4 or MOV filenames were recognized in the script. Check that the script specifies exact source filenames.</p></div>';
+ const files=r.files||[], list=status=>files.filter(x=>x.status===status).map(x=>E(x.name)).join(', ');
+ return `<div class="notice" role="status"><strong>${r.total} distinct footage file${r.total===1?'':'s'} named in the script</strong><p>${r.matched} matched · ${r.missing} missing${r.ambiguous?' · '+r.ambiguous+' with duplicate uploads':''}</p>${r.missing?`<p><strong>Still to upload:</strong> ${list('missing')}</p>`:''}${r.ambiguous?`<p><strong>Duplicate filenames; review:</strong> ${list('ambiguous')}</p>`:''}<details><summary>Show all ${r.total} named files</summary><p>${files.map(x=>`${E(x.name)} (${x.status==='matched'?'uploaded':x.status==='missing'?'missing':'duplicate'})`).join(' · ')}</p></details></div>`;
+}
+function photoRequirementsHTML(){
+ const r=P?.photo_requirements;
+ if(!P?.production_script||r?.status==='no_script')return '<div class="notice"><strong>Photo count</strong><p>Upload a production script to see the photo filenames it mentions.</p></div>';
+ if(!r||r.status!=='found')return '<div class="notice"><strong>Photo count</strong><p>No JPG, JPEG, PNG or WebP filenames were recognized in this script. If a photo is needed, name its file in the script.</p></div>';
+ const files=r.files||[],list=status=>files.filter(x=>x.status===status).map(x=>E(x.name)).join(', ');
+ return `<div class="notice" role="status"><strong>${r.total} photo file${r.total===1?'':'s'} named in the script</strong><p>${r.matched} matched · ${r.missing} missing${r.ambiguous?' · '+r.ambiguous+' with multiple matches':''}</p>${r.missing?`<p><strong>Photos to upload:</strong> ${list('missing')}</p>`:''}${r.ambiguous?`<p><strong>Multiple matching photos; review:</strong> ${list('ambiguous')}</p>`:''}<details><summary>Show all ${r.total} named photos</summary><p>${files.map(x=>`${E(x.name)} (${x.status==='matched'?'matched: '+(x.matched_names||[]).map(E).join(', '):x.status==='missing'?'missing':'multiple matches'})`).join(' · ')}</p></details><p class="small">Filename scan only; examples may be included. JPG, JPEG and PNG match by exact filename stem. Verify who or what the image shows, eligibility and reuse rights separately.</p></div>`;
+}
+// Strict checks decode source frames and can take time. Keep a per-project/version
+// in-memory result; never edit the user's project just to display status.
+let strictStatus={key:null,state:'idle',report:null,error:null,promise:null};
+function strictKey(){return P&&P.scenes?.length&&(P.production_script||P.scenes.some(s=>s.plan_row?.strict_production))?`${P.id}:${P.updated}`:null}
+function ensureStrictStatus(){const key=strictKey();if(!key)return {state:'not_required',report:null};if(strictStatus.key===key)return strictStatus;
+ const id=P.id;strictStatus={key,state:'checking',report:null,error:null,promise:null};const state=strictStatus;
+ state.promise=(async()=>{for(;;){const job=await api(`/api/projects/${id}/strict-cut-status`);if(job.version!==Number(key.slice(key.indexOf(':')+1)))throw Error('The project changed during the check. Refresh to check the current version.');if(job.state==='error')throw Error(job.error||'Strict check failed.');if(job.state==='done')return job.report;state.completed=job.completed;state.total=job.total;document.querySelectorAll('[data-strict-progress]').forEach(n=>{n.textContent=job.total?`${job.completed} of ${job.total} shots checked`:'Checking source frames and timing'});await new Promise(resolve=>setTimeout(resolve,2000))}})().then(r=>{state.report=r;state.state=r.errors.length?'blocked':'passed';return r}).catch(e=>{state.error=e.message;state.state='error';throw e}).finally(()=>{if(strictStatus===state&&P?.id===id&&strictKey()===key&&$('#manage-dialog').open)renderManagement()});
+ // Status may be requested only for display; handle rejection even if no one awaits it.
+ state.promise.catch(()=>{});return state;
+}
+function strictStatusHTML(){const s=ensureStrictStatus();if(s.state==='not_required')return '';
+ if(s.state==='checking')return `<p><strong>Strict cut check:</strong> <span data-strict-progress>${s.total?`${s.completed||0} of ${s.total} shots checked`:'Checking source frames and timing'}</span>. Long videos can take time; playback remains available.</p>`;
+ if(s.state==='error')return `<p><strong>Strict cut check unavailable:</strong> ${E(s.error)}. Export remains blocked until the check succeeds.</p><button type="button" onclick="retryStrictStatus()">Retry strict cut check</button>`;
+ if(s.state==='blocked')return `<p><strong>Strict cuts: ${s.report.errors.length} issue(s) block export.</strong></p><ul class="issues">${s.report.errors.map(x=>`<li>${E(x)}</li>`).join('')}</ul><p><button type="button" onclick="openStrictCutCheck(null)">See per-shot cut check</button></p>`;
+ return `<p><strong>Cut check:</strong> Timing checks passed${s.report.adjustments?.length?` with ${s.report.adjustments.length} one-frame source OUT adjustment(s)` : ''}. Content, identity and rights are not automatically verified.</p><p><button type="button" onclick="openStrictCutCheck(null)">See per-shot cut check</button></p>`;
+}
+async function retryStrictStatus(){try{await api(`/api/projects/${P.id}/strict-cut-status/retry`,'POST');strictStatus.key=null;renderManagement()}catch(e){toast(e.message)}}
+function canBuildStoryboard(){return !!P&&P.script_reading?.status==='read'&&P.script_reading.ready_to_build===true&&!window.buildingStoryboard&&!uploading}
+function buildDisabled(){return canBuildStoryboard()?'':'disabled'}
+function briefHTML(){
+ const footageCount=(P.assets||[]).filter(a=>!a.derived_from&&(a.kind==='video'||a.kind==='image')).length;
+ const reading=P.srt?scriptReadingHTML():'';
+ const progressStatus=(P.review_only_draft||['queued','working','studying','storyboard_ready','rendering','error','interrupted'].includes(P.automatic_status?.status))?automaticStatusHTML():'';
+ const reviewAction=P.edit_mode==='documentary'&&P.production_script&&P.srt&&P.voiceover
+  ?(!P.scenes.length?`<button class="new" type="button" onclick="openBeatProposal()">Build documentary timeline</button>`:`<button class="new" type="button" onclick="openTimeline()">Open timeline</button> <button type="button" onclick="openBeatProposal()">Rebuild timeline from latest script</button>`)
+  :(!P.scenes.length?`<button class="new" type="button" onclick="buildStoryboard()" ${buildDisabled()}>Build storyboard</button>`:`<button class="new" type="button" onclick="openTimeline()">Open timeline</button> <button type="button" onclick="buildStoryboard()" ${buildDisabled()}>Rebuild review from script</button>`);
+ return `<div class="simple-setup">
+ <div id="upload-feedback" class="notice" role="status" aria-live="polite" hidden></div><div id="project-health-panel" class="notice" role="status" aria-live="polite"><strong>Project health</strong><p>Checking imported materials…</p></div>${P.edit_mode==='documentary'?`<div class="notice"><strong>Documentary workspace</strong><p>${P.documentary_beat_review?'The script-driven timeline includes saved sound bites. The browser preview is approximate; Render MP4 runs the final checks and includes script captions, with the fade omitted after confirmation.':'Import your production script and original files here. Saved sound bites can be previewed on the timeline. Final MP4 export currently supports script-driven Beat storyboards.'} Adjusted subtitles are available separately; the original SRT remains unchanged.</p><button type="button" onclick="openDocumentary()">Documentary audio and subtitles</button></div>`:''}
+ ${buildProgressHTML()}${reading}${progressStatus}
+ <p class="setup-intro">Upload your production files below. The script tells you which footage filenames to upload.</p>
+ <div class="setup-grid">
+  <section class="card setup-card"><div class="setup-card-heading"><span class="setup-step">01</span><h3>Production script</h3><span class="setup-status ${P.production_script?'ready':''}">${P.production_script?'Uploaded':'Not uploaded'}</span></div><p>${P.production_script?E(P.production_script.name):'Upload your editing instructions.'}</p><div class="inline"><button type="button" onclick="chooseFile('production_script')">${P.production_script?'Replace script':'Upload script'}</button>${P.production_script?'<button type="button" onclick="removeInput(\'production_script\')">Remove</button>':''}</div><p class="small">TXT, Markdown, JSON or DOCX</p></section>
+  <section class="card setup-card"><div class="setup-card-heading"><span class="setup-step">02</span><h3>SRT subtitles</h3><span class="setup-status ${P.srt?'ready':''}">${P.srt?'Uploaded':'Not uploaded'}</span></div><p>${P.srt?E(P.srt.name)+' · '+P.srt.blocks.length+' subtitles':'Upload your original timed narration.'}</p><div class="inline"><button type="button" onclick="chooseFile('srt')">${P.srt?'Replace SRT':'Upload SRT'}</button>${P.srt?'<button type="button" onclick="removeInput(\'srt\')">Remove</button>':''}</div>${P.srt?.recovered_from?'<p class="small">Recovered from the script; you can replace it with your original SRT.</p>':''}${srtCompareHTML(P.srt?.compared)}</section>
+  <section class="card setup-card"><div class="setup-card-heading"><span class="setup-step">03</span><h3>Voiceover narration</h3><span class="setup-status ${P.voiceover?'ready':''}">${P.voiceover?'Uploaded':'Not uploaded'}</span></div><p>${P.voiceover?E(P.voiceover.name):'Upload your narration audio.'}</p><div class="inline"><button type="button" onclick="chooseFile('voiceover')">${P.voiceover?'Replace narration':'Upload narration'}</button>${P.voiceover?'<button type="button" onclick="removeInput(\'voiceover\')">Remove</button>':''}</div>${P.voiceover?`<audio class="setup-audio" controls preload="metadata" src="${E(P.voiceover.url)}"></audio>`:'<p class="small">MP3, WAV, M4A, AAC, FLAC or OGG</p>'}</section>
+  ${P.edit_mode==='documentary'?`<section id="doc-music-setup-card" class="card setup-card"><div class="setup-card-heading"><span class="setup-step">04</span><h3>Background music or SFX</h3><span class="setup-status ${docMusicCard?.present?'ready':''}">${docMusicCard?.present?'Saved':'Optional'}</span></div>${docMusicCard?.present?`<p><strong>${E(docMusicCard.name||'Background audio')}</strong>${docMusicCard.duration_s?` · ${Number(docMusicCard.duration_s).toFixed(1)}s`:''} · ${docMusicCard.enabled?'on':'off'}</p>`:'<p>No file.</p>'}<p class="small">Plays under the narration only: it dips under the narrator's voice and goes silent during every sound bite, so the footage is heard on its own.</p><div class="inline"><button type="button" onclick="docPickMusic()">${docMusicCard?.present?'Replace':'Add file'}</button>${docMusicCard?.present?`<button type="button" onclick="docToggleMusic()">${docMusicCard.enabled?'Off':'On'}</button>`:''}</div></section>`:''}<section class="card setup-card setup-footage"><div class="setup-card-heading"><span class="setup-step">05</span><h3>Case footage &amp; photos</h3><span class="setup-status ${footageCount?'ready':''}">${footageCount} uploaded</span></div><p>Upload the videos and original photos named in your script.</p>${footageRequirementsHTML()}${photoRequirementsHTML()}<div class="inline"><button type="button" onclick="chooseFile('asset')">Upload footage or photos</button>${footageCount?'':''}</div><p class="small">Every photo—including double-photo and Pixmix collages—is automatically kept whole inside one centred white frame, over a blurred copy with a soft shadow. The same treatment appears in the monitor and final MP4.</p><p class="small">MP4, MOV, JPG, PNG or WebP · original filenames are kept. To place a photo, name it in the script with Treatment: PHOTO and Source IN/OUT: N/A.</p></section>${typeof youtubeCardHTML==='function'?youtubeCardHTML():''}<section class="card setup-card"><details><summary>Media tools diagnostics (optional)</summary><p>Storyroom uses locally available speech, scene and video tools automatically. Open this panel only if a tool needs installation or repair.</p><div class="inline"><button type="button" onclick="openMediaTools()">Check or repair tools</button><button type="button" onclick="openUnderstanding()">Inspect media analysis</button></div></details></section>${footageCount?`<section class="card"><div class="section-title"><div><h2>Imported sources</h2></div></div><div class="asset-grid">${(P.assets||[]).filter(a=>!a.derived_from).map(a=>`<div class="card asset-card">${media(a)}<h3>${E(a.name)}</h3>${a.provenance?.kind==='youtube'?`<p class="small">From YouTube · ${E(a.provenance.source_id||'')} · <a href="${E(a.provenance.url||'')}" target="_blank" rel="noopener">${E(a.provenance.title||a.provenance.url||'')}</a></p>`:''}<p class="small">${a.reserve?E(a.source_label)+" · "+(assetIsUsed(a)?"Used in production script":"Available but unused"):""}</p>${a.kind==="image"?photoDetailsHTML(a)+`<button type="button" onclick="openFeaturedPhotoPicker('${E(a.id)}')">Assign to a person</button><button type="button" title="Cut away news panels, logos or black bars" onclick="openPhotoCrop({asset:'${E(a.id)}'})">Adjust crop</button>`:""}${sourceBindingHTML(a)}${plannedMediaHTML(a)}${a.kind==='video'?`<button type="button" onclick="inspectAssetMetadata('${E(a.id)}')">Media info</button>`:''}<button type="button" onclick="removeAsset('${E(a.id)}')">Remove from project</button></div>`).join("")}</div></section>`:""}
+ ${P.edit_mode==='documentary'&&typeof peopleCardHTML==='function'?peopleCardHTML():''}
+ ${P.edit_mode==='documentary'&&typeof cutawaySetupCardHTML==='function'?cutawaySetupCardHTML():''}
+ </div>${reviewAction?`<div class="setup-next">${reviewAction}<span>Opens a review; it is not a finished export.</span></div>`:''}
+ </div>`;
+}
+// The setup panel can render before documentary_timeline.js has loaded, so the
+// saved bed is read here into its own field instead of sharing that module's state.
+window.docMusicCard=null;
+async function loadDocMusicCard(){
+ await window.docLoadMusic?.();
+}
+function scriptReadingHTML(){
+ const r=P?.script_reading;if(!r)return '';
+ if(r.status==='error')return `<div class="notice warn"><strong>Production script needs attention</strong><p>${E(r.detail)}</p></div>`;
+ if(P.edit_mode==='documentary'&&P.timeline_needs_rebuild)return `<div class="notice warn" role="status"><strong>New uploads are not yet on the timeline</strong><p>Your newest production script, audio, footage or photos were saved. Rebuild the documentary timeline to apply them. The old picture plan is not the current edit.</p><button type="button" onclick="openBeatProposal()">Rebuild timeline from latest files</button></div>`;
+ if(P.edit_mode==='documentary'&&P.documentary_beat_review&&P.scenes.length)return `<div class="notice" role="status"><strong>Script-driven documentary storyboard built</strong><p>${P.srt?.blocks?.length||0} SRT cues · ${P.scenes.length} picture slots. Existing range decisions are checked against the current project before export.</p><div id="doc-brief-readiness">Checking documentary export readiness…</div></div>`;
+ if(r.status==='not_detailed'&&P.edit_mode==='documentary'){
+  // Show one project-level progress statement while the script's named sources
+  // are arriving. A missing S15.mp4 is one pending upload, not twenty bad Beats.
+  const auto=P.auto_build||{};
+  if(!P.scenes.length&&['waiting','building','review'].includes(auto.status)){
+   const running=auto.status==='building';
+   const attention=auto.status==='review';
+   const headline=running?'Building documentary timeline':attention?'One input needs attention':'Waiting for production files';
+   const detail=running?'Storyroom is assembling the exact scripted shots and soundbites.':auto.reason||'Waiting for the named sources in the production script.';
+   return `<div class="notice ${attention?'warn':''}" role="status"><strong>${headline}</strong><p>${E(detail)}</p>${attention?'<p>Check the affected file or clock. Storyroom will not guess a replacement or modify your SRT.</p>':''}</div>`;
+  }
+  const drop=x=>x.includes('Automatic storyboard creation from this format is not implemented')||x.includes('reviewed explicitly');
+  const issues=(r.build_issues||[]).filter(x=>!drop(x));
+  const notes=(r.build_notes||[]).map(x=>typeof x==='string'?x:x.text).filter(Boolean);
+  const blocks=r.documentary_beat_blocks||r.documentary_beat_count,read=r.documentary_beat_count;
+  const head=blocks?`${blocks} Beat block(s) found. ${read?`${read} read cleanly.`:'A conflict in the script stops the reader, so no Beat is accepted yet.'}`:'This script format is not supported for automatic documentary storyboard building.';
+  if(!blocks)return `<div class="notice warn" role="status"><strong>Documentary script needs review before building</strong><p>${head}</p></div>`;
+  // Nothing is built automatically: the plan is reviewed with its own button.
+  // What the plan will change belongs here, so the panel never asks for an edit
+  // the plan then makes by itself.
+  const blocked=issues.length>0;
+  return `<div class="notice ${blocked?'warn':''}" role="status"><strong>${blocked?'Documentary script needs review before building':'Beat script read · review the picture plan'}</strong><p>${head} ${blocked?'These stop the plan until they are resolved:':'Nothing stops the plan. Review it before anything is built; every range change is recorded with the storyboard.'}</p>${blocked?`<ul class="issues">${issues.map(x=>`<li>${E(x)}</li>`).join('')}</ul>`:''}${notes.length?`<details${blocked?'':' open'}><summary>What the plan will change (${notes.length})</summary><ul class="issues">${notes.map(x=>`<li>${E(x)}</li>`).join('')}</ul></details>`:''}<p><button type="button" onclick="openBeatProposal()">Review the Beat picture plan →</button></p></div>`;
+ }
+ if(r.status!=='read')return '';
+ const issues=r.build_issues||[],ready=r.ready_to_build===true;
+ return `<div class="notice ${ready?'':'warn'}" role="status"><strong>${ready?(P.scenes.length?'✓ Input checks passed · review timeline built':'✓ Ready to build the review timeline'):'Script read · items to check'}</strong><p>${r.blocks} SRT blocks · ${r.shots} shots · ${r.video_shots} video shots · ${r.photo_shots||0} photo shots.</p>${ready?'<p>The script, SRT, narration and named media passed the available input checks.</p>':`<ul class="issues">${issues.map(x=>`<li>${E(x)}</li>`).join('')}</ul>`}<p class="small">${ready?'Input checks do not verify strict cuts or permit final export.':'Complete the listed checks before building the timeline.'} Content, identity, eligibility, rights and any editorial caption instructions still need review.</p>${!P.scenes.length?`<button type="button" class="new" onclick="buildStoryboard()" ${buildDisabled()}>Build storyboard</button> `:''}<button type="button" onclick="showScriptReading()">Read the full shot plan and differences</button><div id="script-reading-detail"></div></div>`;
+}
+
+function buildProgressHTML(){
+ const b=window.buildReport;if(!b||b.id!==P?.id)return '';
+ return `<div id="build-progress" class="notice ${b.error?'warn':''}" role="status" aria-live="polite"><strong>${E(b.title)}</strong><p>${E(b.detail)}</p>${b.running?'<progress aria-label="Building storyboard"></progress>':''}${b.done?'<p><button type="button" class="new" onclick="openTimeline()">Open timeline →</button></p>':''}</div>`;
+}
+function updateBuildProgress(id,title,detail,extra={}){window.buildReport={id,title,detail,...extra};const old=$('#build-progress');if(old)old.outerHTML=buildProgressHTML();else if($('#upload-feedback'))$('#upload-feedback').insertAdjacentHTML('afterend',buildProgressHTML())}
+function playReviewTimeline(){if(!P?.scenes.length){toast('Build the timeline first.');return}if(!leave())return;pauseManagementMedia();if($('#plan-dialog').open)$('#plan-dialog').close();if($('#manage-dialog').open)$('#manage-dialog').close();playEditor()}
+function openTimeline(){if(!P?.scenes.length){toast('No timeline has been built yet.');return}pauseManagementMedia();if($('#manage-dialog').open)$('#manage-dialog').close();sceneIndex=0;resetEditor();renderProject()}
+async function createScriptDraft(){return buildStoryboard()}
+
+async function showScriptReading(){
+ const id=P?.id;if(!id)return;const box=$('#script-reading-detail');if(!box)return;box.textContent='Reading the complete script…';
+ try{const r=await api(`/api/projects/${id}/script-reading`);if(P?.id!==id||!box.isConnected)return;if(r.status!=='read'){box.textContent=r.detail||'No detailed shot plan was found.';return}
+ const time=ms=>{const s=Math.floor(ms/1000),pad=n=>String(n).padStart(2,'0');return `${pad(Math.floor(s/3600))}:${pad(Math.floor(s/60)%60)}:${pad(s%60)}.${String(ms%1000).padStart(3,'0')}`};
+ box.innerHTML=`<details><summary>Project instructions and final checks</summary><pre class="script-reading-text">${E(r.project_instructions)}\n\n${E(r.final_checks)}</pre></details><details><summary>${r.narration_mismatch_blocks.length} SRT wording differences</summary>${r.shots_detail.filter((x,i,a)=>x.narration_mismatch&&a.findIndex(y=>y.srt_blocks[0]===x.srt_blocks[0])===i).map(x=>`<p><strong>Srt${E(x.srt_blocks[0])}</strong><br>Script: ${E(x.script_narration)}<br>Uploaded SRT: ${E(x.srt_narration)}</p>`).join('')}</details><details open><summary>${r.shots} shot instructions</summary>${r.shots_detail.map(x=>`<details class="script-shot"><summary>${E(x.shot_id)} · ${E(x.source_file)} · ${E(x.requested_treatment)} · ${time(x.timeline_in_ms)}–${time(x.timeline_out_ms)}</summary><p>Source: ${time(x.source_in_ms)}${(x.visual_status==='VIDEO'||x.native_static_interval)?'–'+time(x.source_out_ms)+' (exclusive)':' (frame)'}</p><p><strong>Visible:</strong> ${E(x.visible_content)}</p><p><strong>Editor note (continuity):</strong> ${E(x.continuity ?? x.match_reason ?? "")}</p><p><strong>On-screen caption:</strong> ${E(x.plain_cue && x.continuity === undefined ? "Not specified in the legacy combined field" : (x.required_caption || "None"))}</p><p><strong>Limits:</strong> ${E(x.limit_on_implication)}</p><p><strong>Source register:</strong> ${E(x.register_window||'')} · ${E(x.register_visible||'')} · ${E(x.register_restrictions||'')}</p></details>`).join('')}</details>`;
+ }catch(e){box.textContent=e.message}
+}
+function uploadFeedback(message,error=false){let node=$('#upload-feedback');if(!node&&$('#content')){node=document.createElement('div');node.id='upload-feedback';node.setAttribute('role','status');node.setAttribute('aria-live','polite');$('#content').prepend(node)}if(node){node.hidden=false;node.className='notice'+(error?' warn':'');node.innerHTML=`<span>${E(message)}</span>${window.activeImport?`<p>${window.activeImport.hasNext?'<button type="button" onclick="skipCurrentImport()">Next file (skip this one)</button> ':''}<button type="button" onclick="cancelCurrentImport()">Cancel remaining import</button></p>`:window.pendingImportDecision?'<p><button type="button" onclick="continueImportBatch()">Next file</button> <button type="button" onclick="stopImportBatch()">Stop batch</button></p>':''}`}if(!window.activeImport||error)toast(message)}
+function automaticStatusHTML(){
+ if(!P)return '';
+ if(P.edit_mode==='documentary'&&P.documentary_beat_review&&P.scenes.length){const ids=new Set((P.assets||[]).map(a=>a.id)),total=P.scenes.length,unassigned=P.scenes.filter(s=>!s.asset_id||!ids.has(s.asset_id)),groups=typeof docCueGroups==='function'?docCueGroups():null;
+  return `<div class="notice ${unassigned.length?'warn':''}"><strong>Documentary timeline · ${groups?`${groups.length} cue shots · `:''}${total-unassigned.length} of ${total} picture slots assigned</strong><p>${unassigned.length?`${unassigned.length} picture slot(s) have no assigned source. Playback pauses at these slots.`:'Every picture slot has an assigned source. This does not verify its content or identity.'}</p>${strictStatusHTML()}<p>Browser timeline playback includes sound bites but is approximate, not frame-accurate cut verification.</p><p><button type="button" class="new" onclick="playReviewTimeline()">▶ Play documentary timeline</button></p><p>Use Render MP4 for final checks. Verify footage, identity and reuse rights yourself.</p></div>`;}
+ if(P.script_moving_only){const ids=new Set((P.assets||[]).map(a=>a.id)),total=P.scenes.length,unassigned=P.scenes.filter(s=>!s.asset_id||!ids.has(s.asset_id));const errors=P.validation?.errors||[];
+  return `<div class="notice warn"><strong>Review timeline · ${total-unassigned.length} of ${total} shots assigned</strong><p>${unassigned.length?`${unassigned.length} shot(s) have no assigned source. Playback pauses at these shots.`:'Every timeline shot has an assigned source. This does not verify its content or identity.'}</p>${errors.length?`<p><strong>Other review-export issues:</strong></p><ul class="issues">${errors.map(x=>`<li>${E(x)}</li>`).join('')}</ul>`:''}${strictStatusHTML()}<p>Playback is available for review even when export is blocked. Browser playback is not a frame-accurate cut verification.</p><p><button type="button" class="new" onclick="playReviewTimeline()">▶ Play review timeline</button></p>${P.edit_mode==='documentary'?`<p>The documentary timeline can play a prepared review MP4 including sound bites. Final-quality documentary export is not yet available. Verify footage, identity and reuse rights yourself.</p>`:`<p>Final export is blocked because this is a review draft. A review MP4 can be rendered only after all strict and review checks pass. Verify footage, identity and reuse rights yourself.</p>`}</div>`;}
+
+ if(P.review_only_draft)return `<div class="notice warn"><strong>Script review timeline · not a finished edit</strong><p>Shots and source frames are shown for inspection. Editorial caption layout, framing and exact freeze frames still need implementation and review; export is blocked. Your original script, names, narration and SRT are unchanged.</p></div>`;
+ if(!P.scenes.length&&P.script_reading?.status==='read'&&P.script_reading.blocker_count)return '';
+ const s=P.automatic_status||{},r=P.render||{},ready=P.automatic_readiness||{},working=['queued','working','studying','storyboard_ready','rendering'].includes(s.status);
+ const unmatched=(P.source_match_report||[]).filter(x=>!['matched','selected'].includes(x.status));
+ if(!P.scenes.length&&s.status==='blocked'&&unmatched.length)return `<div class="notice warn"><strong>Storyboard is blocked by unmatched script filenames.</strong><p>${unmatched.map(x=>E(x.source_file)).join(', ')} need the correct uploaded footage. Your SRT and uploads are already present.</p><p><button type="button" onclick="changeTab('assets')">Resolve script filenames</button></p></div>`;
+ // Never sit silently idle: if assembly will not run, say why and what to do about it.
+ if(ready.status&&['blocked','needs_plan','manual','paused'].includes(ready.status)&&!P.scenes.length){
+  const action=ready.status==='needs_plan'?'<p><button type="button" onclick="downloadMapTemplate()">Download the block-map template</button> <button type="button" onclick="chooseFile(\'srt_block_map\')">Upload a block map</button> <button type="button" onclick="chooseFile(\'production_script\')">Upload a production script</button></p>'
+   :ready.status==='blocked'?`<p class="small">Still needed: ${E((ready.missing||[]).join(', ')||'see the message above')}</p>`
+   :ready.status==='manual'?`<p><button type="button" onclick="buildStoryboard()" ${buildDisabled()}>Rebuild deliberately</button></p>`
+   :'';
+  return `<div class="notice warn"><strong>Automatic assembly is not running — ${E({blocked:'inputs are missing',needs_plan:'there is no plan yet',manual:'manual edits take precedence',paused:'it is switched off for this production'}[ready.status])}.</strong><p>${E(ready.detail||s.detail||'')}</p>${action}</div>`;
+ }
+ if(P.scenes.length){
+  const preview=P.preview||{},previewInfo=preview.status==='done'?'<p>Temporary smooth preview is ready. Pause playback to switch to it.</p>':['running','queued'].includes(preview.status)?`<p>Preparing smooth preview: ${Number(preview.progress||0).toFixed(0)}% · ${E(preview.detail||'')}</p>`:`<p><button type="button" onclick="prepareSmoothPreview()">Prepare smooth preview</button> ${preview.status==='error'?E(preview.detail):'Creates a temporary low-resolution playback copy without changing your edit.'}</p>`;
+  const errors=P.validation?.errors||[];
+  if(['running','queued'].includes(r.status))return `<div class="notice"><strong>${P.scenes.length} picture slots built · continuous master rendering.</strong><p>The Program monitor can use the rendered master when it is ready.</p></div>`;
+  if(r.status==='done'&&r.current)return `<div class="notice"><strong>Continuous master ready.</strong><p>The Program monitor can play the rendered MP4.</p></div>`;
+  if(errors.length)return `<div class="notice warn"><strong>Continuous master not rendered · ${errors.length} issue(s) need attention.</strong><p>The Program monitor is using source preview, which can pause while loading footage.</p>${errors.slice(0,6).map(x=>`<p class="small">${E(x)}</p>`).join('')}${previewInfo}</div>`;
+  return `<div class="notice"><strong>${P.scenes.length} picture slots built · no current continuous master.</strong><p>${E(s.status==='error'?s.detail:'Press Render MP4 (top right) to start a render. Until then the Program monitor uses source preview.')}</p>${previewInfo}</div>`;
+ }
+ if(s.status==='error'||s.status==='interrupted')return `<div class="notice error"><strong>Automatic assembly stopped.</strong><p>${E(s.detail||'Review the uploaded files and build the storyboard again.')}</p></div>`;
+ if(working)return `<div class="notice"><strong>Working automatically — please allow processing time.</strong><p>${E(s.detail||'Studying the complete source videos before assembly.')}</p></div>`;
+ if(P.inputs_ready)return `<div class="notice"><strong>All required inputs are present.</strong><p>Use <em>Build storyboard →</em> below, or wait for automatic assembly. The system studies every uploaded MP4 before placing clean cuts.</p></div>`;
+ return `<div class="notice"><strong>Import the production script, original narration, SRT and MP4 footage.</strong><p>After those inputs are present, the storyboard is assembled automatically. An SRT supplies timing and text, not pictures.</p></div>`;
+}
+function readableBytes(bytes){return bytes>=1024**3?(bytes/1024**3).toFixed(2)+' GB':bytes>=1024**2?(bytes/1024**2).toFixed(1)+' MB':(bytes/1024).toFixed(1)+' KB'}
+function abortActiveImport(intent){const active=window.activeImport;if(!active||active.intent)return;active.intent=intent;uploadFeedback(intent==='skip'?'Skipping this file and stopping its transfer…':'Stopping the import…');fetch(`/api/projects/${active.id}/imports/${active.key}`,{method:'DELETE',signal:AbortSignal.timeout(4000)}).catch(()=>{}).finally(()=>active.xhr.abort())}
+function cancelCurrentImport(){abortActiveImport('cancel')}
+function skipCurrentImport(){abortActiveImport('skip')}
+function continueImportBatch(){const resolve=window.pendingImportDecision;window.pendingImportDecision=null;if(resolve)resolve(true)}
+function stopImportBatch(){const resolve=window.pendingImportDecision;window.pendingImportDecision=null;if(resolve)resolve(false)}
+function uploadWithProgress(id,kind,file,index,count){return new Promise((resolve,reject)=>{
+ const streaming=kind==='asset'&&/\.(mp4|mov)$/i.test(file.name);if(streaming&&file.size>8*1024**3){reject(Error('This video exceeds the 8 GB per-file limit.'));return}
+ const xhr=new XMLHttpRequest(),key=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join(''),started=performance.now();let timer,busyPoll=false,finished=false,transferDone=false;
+ const prefix=`File ${index} of ${count} · ${file.name} · `,elapsed=()=>Math.round((performance.now()-started)/1000)+'s elapsed';
+ window.activeImport={xhr,id,key,hasNext:kind==='asset'&&index<count,intent:null};
+ const finish=(error,data)=>{if(finished)return;finished=true;clearInterval(timer);if(window.activeImport?.key===key)window.activeImport=null;error?reject(error):resolve(data)};
+ xhr.open('POST',streaming?`/api/projects/${id}/media-stream?name=${encodeURIComponent(file.name)}`:`/api/projects/${id}/upload`);xhr.setRequestHeader('X-Upload-ID',key);if(streaming)xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.timeout=(streaming&&file.size>100*1024**2?60:10)*60*1000;
+ xhr.upload.onprogress=e=>{if(!finished)uploadFeedback(prefix+'Sending '+readableBytes(e.loaded)+' / '+readableBytes(e.total||file.size)+(e.lengthComputable?' ('+Math.floor(e.loaded/e.total*100)+'%)':'')+' · '+elapsed())};
+ xhr.upload.onload=()=>{transferDone=true;if(!finished)uploadFeedback(prefix+'Sent '+readableBytes(file.size)+'. Waiting for the local server · '+elapsed())};
+ xhr.onload=()=>{let data;try{data=JSON.parse(xhr.responseText)}catch{return finish(Error('The local server returned an unreadable response (HTTP '+xhr.status+'). Check its terminal window.'))}if(xhr.status>=200&&xhr.status<300)finish(null,data);else finish(Error(data.error||'Import failed (HTTP '+xhr.status+').'))};
+ xhr.onerror=()=>finish(Error('Connection to the local editor was interrupted. Check that its server is still running. Check the library before retrying this file.'));
+ xhr.onabort=()=>{const intent=window.activeImport?.key===key?window.activeImport.intent:null;const error=Error(intent==='skip'?'Skipped by request.':'Import stopped.');error.importAction=intent||'cancel';finish(error)};
+ xhr.ontimeout=()=>{fetch(`/api/projects/${id}/imports/${key}`,{method:'DELETE'}).catch(()=>{});finish(Error('Import exceeded the '+(xhr.timeout/60000)+'-minute request limit. Check the local server terminal and media library before retrying.'))};
+ const labels={waiting:'Waiting for the local server',waiting_for_project:'Waiting for another project operation',receiving:'Receiving / parsing uploaded data',saving:'Saving the file on disk',checking_metadata:'Checking audio/video metadata (15-second check limit)',checking_image:'Checking the image',reading_document:'Reading document instructions',indexing:'Updating the project library',done:'Import saved; receiving project response',error:'Server reported an import error'};
+ timer=setInterval(async()=>{if(finished||busyPoll)return;busyPoll=true;try{const r=await fetch(`/api/projects/${id}/imports/${key}`,{signal:AbortSignal.timeout(4000)});if(r.ok){const state=await r.json();if(!finished&&(transferDone||!['waiting','waiting_for_project','receiving'].includes(state.stage)))uploadFeedback(prefix+(labels[state.stage]||state.stage)+(state.stage==='saving'&&state.saved_bytes?' · '+readableBytes(state.saved_bytes)+' written':'')+(state.detail?' — '+state.detail:'')+' · '+elapsed())}}catch{}finally{busyPoll=false}},1000);
+ let data=file;if(!streaming){data=new FormData();data.append('file',file);data.append('kind',kind);data.append('replace','yes')}uploadFeedback(prefix+(streaming?'Streaming video directly · ':'Starting transfer · ')+readableBytes(file.size));xhr.send(data);
+})}
+
+async function importSelectedFiles(kind,selected){
+ const files=Array.from(selected||[]);if(!files.length)return;if(!P){toast('Create or open a production first.');return}if(uploading){toast('Please wait for the current upload.');return}if(!leave())return;if(kind==='srt'&&P.scenes.length&&!confirm('Replacing SRT clears the current storyboard. Continue?'))return;
+ const id=P.id;uploading=true;const completed=[],skipped=[],failures=[],replaced=[],warnings=[];let stopped=false;
+ try{
+  for(const [index,file] of files.entries()){
+   try{
+    const updated=await uploadWithProgress(id,kind,file,index+1,files.length);completed.push(file.name);
+    if(updated.replaced_video){replaced.push(updated.replaced_video);warnings.push(...(updated.replacement_warnings||[]))}
+    // A script/footage duration mismatch is reported here, at the moment the
+    // pieces first exist together, not saved for a later wall of errors.
+    if(updated.script_preflight)warnings.push(...updated.script_preflight.filter(w=>!warnings.includes(w)));
+    if(P?.id===id){if(updated.replaced_video){pauseEditor();clearPreparedSource();sourceScene='';sourceReady=false}P=updated;renderProject()}
+   }catch(e){
+    if(e.importAction==='cancel'){stopped=true;break}
+    skipped.push(file.name);
+    if(e.importAction==='skip')continue;
+    failures.push(file.name+': '+(e.message||'Unknown error.'));
+    if(kind==='asset'&&index+1<files.length){
+     const proceed=await new Promise(resolve=>{window.pendingImportDecision=resolve;uploadFeedback('Could not import '+file.name+': '+(e.message||'Unknown error.')+' Choose Next file to continue with the remaining uploads. Check the library before retrying this file.',true)});
+     if(proceed)continue;
+    }
+    stopped=true;break;
+   }
+  }
+  if(P?.id===id){try{P=await api('/api/projects/'+id);renderProject()}catch{renderProject()}}
+  await list();
+  let message=completed.length?'Imported: '+completed.join(', ')+'.':'No files confirmed imported in this batch.';
+  if(skipped.length)message+=' Skipped or failed: '+skipped.join(', ')+'. Check the library before retrying; an upload already being saved may still appear.';
+  if(failures.length)message+=' Import errors: '+failures.join('; ')+'.';
+  if(stopped)message+=' Remaining files were not sent.';
+  if(replaced.length)message+=' Replaced existing footage: '+replaced.map(r=>r.name+(r.unassigned_scenes?' ('+r.unassigned_scenes+' shots need attention)':'')).join(', ')+'. Affected shots need review.';
+  if(warnings.length)message+=' '+warnings.join(' ');
+  uploadFeedback(message,!!(skipped.length||stopped||warnings.length));
+ }catch(e){uploadFeedback('Could not finish the import batch: '+(e.message||'Unknown error.')+'. Check the library before retrying.',true)}finally{window.pendingImportDecision=null;uploading=false}
+}
+
+const POLICY_LABEL={clips_only:'Moving footage only',mixed:'Moving footage and photographs'};
+const LAYOUT_LABEL={blurred_fit:'Fitted over a blurred copy of itself',full_bleed:'Cropped to fill the frame'};
+async function setFormat(value){
+ if(!P||!leave())return;
+ const id=P.id,old=P.format;P.format=value;
+ syncMonitorShape();syncAspectChip();renderProgram();updatePosition();
+ try{const result=await api('/api/projects/'+id,'PATCH',{format:value});if(P?.id!==id)return;
+  P.format=result.format;P.size=result.size;P.output=result.output;P.export_plan=result.export_plan;P.updated=result.updated;
+  syncMonitorShape();syncAspectChip();renderExport();
+  toast('Aspect applied to the monitor. Final reframing is encoded during export.');
+ }catch(e){if(P?.id===id){P.format=old;syncMonitorShape();syncAspectChip();toast(e.message)}}
+}
+async function setSize(value){if(!P||!leave())return;const id=P.id;try{const saved=await api('/api/projects/'+id,'PATCH',{size:value});if(P?.id!==id)return;
+ P.size=saved.size;P.output=saved.output;P.export_plan=saved.export_plan;P.updated=saved.updated;
+ renderExport();toast('Export resolution saved. Timeline unchanged; resolution takes effect on final encode.');
+}catch(e){toast(e.message)}}
+async function chooseFile(kind){if(!P||!leave())return;const picker=$('#file-picker');picker.value='';picker.multiple=kind==='asset';picker.removeAttribute('accept');picker.onchange=()=>importSelectedFiles(kind,picker.files);picker.click()}
+
+async function buildStoryboard(){
+ // Documentary Beat scripts require their own replacement builder, including
+ // original soundbites. The generic review builder does not replace Beat plans.
+ if(P?.edit_mode==='documentary'&&P?.production_script&&(P?.script_reading?.status==='not_detailed'||P?.documentary_beat_review))return openBeatProposal();
+ if(!canBuildStoryboard()){toast('Complete the input checks before building the timeline.');return}
+ if(!leave())return;
+ if(!$('#manage-dialog').open)manage('brief');
+ if(P.scenes.length&&(!P.review_only_draft||P.manual_scene_edits)){updateBuildProgress(P.id,'Existing edits preserved','This timeline contains work that cannot be automatically replaced. Review it before rebuilding.',{done:true});return}
+ if(P.scenes.length&&!confirm('Rebuild the existing review timeline from the currently uploaded script? The current review placements will be replaced. Uploaded script, SRT, narration and footage will be kept.'))return;
+ const id=P.id,key=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+ window.buildingStoryboard=true;let timer;updateBuildProgress(id,'Building storyboard','Reading the production script and SRT…',{running:true});
+ const buttons=[...document.querySelectorAll('button[onclick="buildStoryboard()"]')];buttons.forEach(b=>b.disabled=true);
+ try{
+  let recovering=false,finished=false;
+  const finish=result=>{if(finished||P?.id!==id)return;finished=true;window.buildingStoryboard=false;clearInterval(timer);P=result;sceneIndex=0;const placed=P.script_application?.placed_scenes||0,total=P.scenes.length,issues=(P.script_application?.issues||[]).length;updateBuildProgress(id,'Review timeline ready',`${placed} of ${total} cue shots assigned; ${issues} unresolved. Source content, photos, captions, still limits and rights still need review. No missing footage was substituted.`,{done:true});renderProject();list().catch(()=>{});};
+  timer=setInterval(async()=>{try{const r=await fetch(`/api/projects/${id}/imports/${key}`);if(!r.ok)return;const state=await r.json();if(P?.id!==id||finished||!window.buildingStoryboard)return;if(state.stage==='done'&&!recovering){recovering=true;updateBuildProgress(id,'Review timeline saved','Loading the saved timeline…',{running:true});try{finish(await api(`/api/projects/${id}`))}finally{recovering=false}}else if(state.detail&&state.stage!=='done')updateBuildProgress(id,'Building storyboard',state.detail,{running:true})}catch{}},500);
+  const response=await fetch(`/api/projects/${id}/script-draft`,{method:'POST',headers:{'Content-Type':'application/json','X-Upload-ID':key},body:JSON.stringify({moving_only:true,replace_review:!!P.scenes.length,require_ready:true})});
+  let result;try{result=await response.json()}catch{throw Error('The server response could not be read. Check the project before retrying.')}
+  if(!response.ok)throw Error(result.error||'The script could not be read.');
+  finish(result);
+ }catch(e){if(P?.id===id&&window.buildingStoryboard){try{const state=await api(`/api/projects/${id}/imports/${key}`);if(state.stage==='done'){P=await api(`/api/projects/${id}`);sceneIndex=0;updateBuildProgress(id,'Review timeline ready',state.detail+' Source content and rights still need review.',{done:true});renderProject()}else updateBuildProgress(id,'Build status unavailable',e.message+' Check the saved project before retrying.',{error:true})}catch{updateBuildProgress(id,'Build status unavailable','Check the saved project before retrying. Your uploads were kept.',{error:true})}}}
+ finally{clearInterval(timer);window.buildingStoryboard=false;buttons.forEach(b=>{if(b.isConnected)b.disabled=!canBuildStoryboard()})}
+}
+const options=(items,v)=>items.map(([k,t])=>`<option value="${E(k)}" ${k===v?'selected':''}>${E(t)}</option>`).join('');
+function media(a,controls=true){if(!a)return '<div class="media"><span class="muted">No visual assigned</span></div>';return `<div class="media">${a.kind==='image'?`<img src="${a.url}" alt="${E(a.name)}">`:`<video ${controls?'controls':''} preload="none" src="${a.url}${a.document_plan?.cuts?.length?'#t='+(a.document_plan.cuts[0].source_in_ms/1000):''}"></video>`}</div>`}
+function assetsHTML(){return `<div class="section-title"><div><h2>Imported footage</h2></div><button class="new" onclick="chooseFile('asset')">＋ Import media</button></div>${footageRequirementsHTML()}${photoRequirementsHTML()}${sourceMatchingHTML()}${P.assets.length?`${bulkReuseRightsHTML()}<div class="asset-grid">${P.assets.map(a=>`<div class="card asset-card">${media(a)}<h3>${E(a.name)}</h3>${a.provenance?.kind==='youtube'?`<p class="small">From YouTube · ${E(a.provenance.source_id||'')} · <a href="${E(a.provenance.url||'')}" target="_blank" rel="noopener">${E(a.provenance.title||a.provenance.url||'')}</a></p>`:''}<p class="small">${a.verified?'Media-use flag set; rights decision is separate':a.approval_record?.active===false?'Approval revoked':'Not auto-approved'}${a.reserve?' · '+E(a.source_label)+' · '+(assetIsUsed(a)?'Explicitly placed':'Held in reserve'):''}</p>${a.kind==='image'&&!a.derived_from?photoDetailsHTML(a)+`<button type="button" onclick="openFeaturedPhotoPicker('${E(a.id)}')">Assign to a person</button><button type="button" title="Cut away news panels, logos or black bars" onclick="openPhotoCrop({asset:'${E(a.id)}'})">Adjust crop</button>`:''}${reuseRightsHTML(a)}${sourceBindingHTML(a)}${plannedMediaHTML(a)}<button type="button" onclick="removeAsset('${E(a.id)}')">Remove from project</button></div>`).join('')}</div>`:'<div class="large-empty"><h2>Import your footage.</h2><p>Original filenames are retained for script matching. Record a reuse-rights decision for each file.</p><button type="button" onclick="chooseFile(&quot;asset&quot;)">Import media</button></div>'}`}
+function photoDetailsHTML(a){
+ return `<details class="reuse-rights"><summary>Photo identity and source</summary><p class="small">Identify the pictured person or document yourself. Changing the source resets the recorded reuse decision; this does not independently verify identity or rights.</p><form onsubmit="saveAsset(event,'${E(a.id)}')"><label>Person or people shown (comma separated)<input name="people" value="${E((a.people||[]).join(', '))}" placeholder="Exact names, if known"></label><label>Subject or relationship<input name="category" value="${E(a.category||'general')}" placeholder="Victim, suspect, document, relative, or other"></label><label>Photo source or provenance<input name="source" value="${E(a.source||'')}" placeholder="Where this photo came from"></label><label>Identity and context notes<textarea name="notes" rows="2">${E(a.notes||'')}</textarea></label><label class="check-label"><input type="checkbox" name="verified" ${a.verified?'checked':''}> I have checked the identity and context described above.</label><button type="submit">Save photo details</button></form></details>`;
+}
+function bulkReuseRightsHTML(){
+ return `<section class="card reuse-rights bulk-reuse-rights"><h3>Approve reuse for all uploaded sources</h3><p class="small">The same decision and details will replace any previous rights decisions for all ${P.assets.length} files listed below. Only approve if the details apply to every file. New or replaced files need a new review. This is your attestation, not independent copyright clearance.</p><details><summary>Files included (${P.assets.length})</summary><ul>${P.assets.map(a=>`<li>${E(a.original_name||a.name)}</li>`).join('')}</ul></details><form onsubmit="saveAllReuseRights(event)">${P.assets.map(a=>`<input type="hidden" name="asset_id" value="${E(a.id)}">`).join('')}<label>Basis for approval<select name="basis" required>${options([['','Select a basis'],['permission','Permission'],['license','License'],['public_domain','Public domain'],['other','Other reviewed basis']],'')}</select></label><label>Evidence, intended use and restrictions for all files<textarea name="details" rows="4" maxlength="5000" required placeholder="Describe the rights holders, permission or licenses, intended use and limits for the listed files"></textarea></label><label class="check-label"><input type="checkbox" name="attested" required> I confirm I have reviewed the listed files and approve reuse for each under the details above.</label><button type="submit">Approve reuse for all ${P.assets.length} files</button></form></section>`;
+}
+async function saveAllReuseRights(e){
+ e.preventDefault();const form=e.currentTarget,f=new FormData(form),button=form.querySelector('button[type=submit]'),ids=f.getAll('asset_id');
+ if(!f.get('basis')||!String(f.get('details')||'').trim()||!f.has('attested')){toast('Choose a basis, provide supporting details and confirm the decision for every file.');return}
+ button.disabled=true;try{P=await api(`/api/projects/${P.id}/assets/reuse-rights`,'PUT',{asset_ids:ids,basis:f.get('basis'),details:f.get('details'),attested:f.has('attested')});dirty=false;renderProject();toast(`Reuse decision saved for ${ids.length} files. This does not independently verify rights or approve scenes.`)}catch(err){toast(err.message)}finally{if(button.isConnected)button.disabled=false}
+}
+function reuseRightsHTML(a){
+ const r=a.reuse_review||{},decision=r.decision||'unreviewed',label={unreviewed:'Not yet reviewed',approved:'Approved by you',not_approved:'Not approved'};
+ return `<details class="reuse-rights"><summary>Reuse rights · ${E(label[decision]||'Not yet reviewed')}</summary><form onsubmit="saveReuseRights(event,'${E(a.id)}')"><label>Decision<select name="decision">${options([['unreviewed','Not yet reviewed'],['approved','I approve reuse for the stated use'],['not_approved','Do not approve reuse']],decision)}</select></label><label>Basis for approval<select name="basis">${options([['','Select a basis'],['permission','Permission'],['license','License'],['public_domain','Public domain'],['other','Other reviewed basis']],r.basis||'')}</select></label><label>Evidence, intended use and restrictions<textarea name="details" rows="3" maxlength="5000" placeholder="Record the rights holder, license or permission, intended use and limits">${E(r.details||'')}</textarea></label><label class="check-label"><input type="checkbox" name="attested"> I confirm this decision applies to this file and intended use.</label><button type="submit">Save reuse decision</button></form></details>`;
+}
+async function saveReuseRights(e,id){
+ e.preventDefault();const form=e.currentTarget,f=new FormData(form),decision=f.get('decision'),button=form.querySelector('button[type=submit]');
+ if(decision==='approved'&&(!f.get('basis')||!String(f.get('details')||'').trim()||!f.has('attested'))){toast('Choose a basis, describe the rights and intended use, and confirm your decision.');return}
+ button.disabled=true;try{P=await api(`/api/projects/${P.id}/assets/${id}/reuse-rights`,'PUT',{decision,basis:f.get('basis'),details:f.get('details'),attested:f.has('attested')});dirty=false;renderProject();toast('Reuse decision saved for this file. This does not verify rights or approve its scenes.')}catch(err){toast(err.message)}finally{if(button.isConnected)button.disabled=false}
+}
+async function saveAsset(e,id){e.preventDefault();const f=new FormData(e.target);const d=Object.fromEntries(f);d.people=d.people.split(',').map(x=>x.trim()).filter(Boolean);d.verified=f.has('verified');P=await api(`/api/projects/${P.id}/assets/${id}`,'PATCH',d);dirty=false;renderProject();toast('Asset review saved. Affected scene approvals have been reset.')}
+async function splitBeat(){if(!leave())return;const s=P.scenes[sceneIndex],dur=(s.frame_out-s.frame_in)/30;const v=prompt(`Split how many seconds after this scene begins? Duration: ${dur.toFixed(2)}s. Narration text is divided approximately; review both new beats.`,(dur/2).toFixed(2));if(v===null)return;P=await api(`/api/projects/${P.id}/scenes/${s.id}/split`,'POST',{offset_s:Number(v)});renderProject();await list();toast('Picture beat split. Assign the second visual and review both beats. Original audio and SRT are unchanged.')}
+async function mergeBeat(){if(!leave()||!confirm('Merge this picture beat with the next? The first asset is retained; review focus, identities and source duration again.'))return;P=await api(`/api/projects/${P.id}/scenes/${P.scenes[sceneIndex].id}/merge`,'POST',{});renderProject();await list();toast('Picture beats merged. Editorial approval has been reset.')}
+function deliveryHTML(){const v=P.validation,f=P.final_validation,r=P.render||{},running=['running','queued'].includes(r.status),strict=ensureStrictStatus(),strictReady=['passed','not_required'].includes(strict.state);return `<div class="two"><section class="card"><h3>Export readiness</h3><p><button type="button" onclick="playReviewTimeline()" ${P.scenes.length?'':'disabled'}>▶ Play review timeline</button> <span class="small">Playback is separate from export checks.</span></p>${P.documentary_beat_review?`<p><button type="button" onclick="makeExportMatchedPreview()" ${P.scenes.length?'':'disabled'}>▶ Render accurate transitions preview (low-res)</button></p><p class="small">Encodes the full Beat timeline using the same transitions, CTA overlays and audio compositor as final export. Not instantaneous. Does not approve final export or burn SRT subtitles.</p><div id="export-matched-preview-status" class="small" aria-live="polite"></div>`:''}<p class="small">Frame ${E((P.output||{}).label||'')} · switch shape beside the monitor</p><label>Export resolution <select aria-label="Export resolution" onchange="setSize(this.value)">${options([[P.size||'1080p',P.size||'1080p'],...['480p','720p','1080p','1440p','4k'].filter(x=>x!==P.size).map(x=>[x,x.toUpperCase()])],P.size||'1080p')}</select></label><p><button type="button" onclick="openStrictCutCheck(null)">Check every shot’s script and placed cuts</button></p><p><a class="download" href="/api/projects/${P.id}/coverage-summary">↓ Download coverage summary</a></p>${v.errors.length?`<div class="notice warn">${v.errors.length} review-export items need attention.</div><ul class="issues">${v.errors.slice(0,30).map(x=>`<li>${E(x)}</li>`).join('')}</ul>`:'<div class="notice">General input checks passed. Strict cut checks are shown separately below.</div>'}<div class="notice ${strict.state==='blocked'||strict.state==='error'?'warn':''}">${strictStatusHTML()}</div>${v.notes.map(x=>`<p class="small">${E(x)}</p>`).join('')}<div><label class="check-label"><input type="checkbox" id="burn-script-captions" ${exportScriptCaptions?'checked':''} onchange="setScriptCaptionExport(this.checked)"> Burn on-screen script captions</label><label class="check-label"><input type="checkbox" id="burn-srt-subtitles" ${editorCC?'checked':''} onchange="setEditorCaptions(this.checked)"> Burn SRT subtitles (matches CC preview)</label></div><div class="actionbar"><button type="button" onclick="approveReadyScenes()">Approve all ready beats</button><button ${!v.can_export||running||!strictReady?'disabled':''} onclick="startExport(false)">Render review</button><button class="new" ${!f.can_export||running||!strictReady?'disabled':''} onclick="startExport(true)">Render final MP4</button></div><p class="small">${P.automatic_timeline&&!P.manual_scene_edits?'This prepared timeline has passed its source and timing checks. No per-slot assignments or approval clicks are needed.':'Final delivery additionally requires each scene’s approval and a documented reuse decision for every selected asset.'}</p>${f.errors.filter(x=>/approval|rights/.test(x)).slice(0,6).map(x=>`<p class="small">${E(x)}</p>`).join('')}</section><section class="card"><div class="eyebrow">CLEAN DELIVERY</div><h2>${E(r.stage||'Ready when you are')}</h2><p>Captions and SRT subtitles are off unless selected. Separate original SRT and a saved review record.</p>${running?`<progress max="100" value="${r.progress||0}"></progress><p class="small">${Math.round(r.progress||0)}% · ${E(r.detail||'')}</p><button onclick="cancelExport()">Cancel export</button>`:''}${r.status==='error'?'<div class="notice error">Export could not finish. The saved production remains intact.</div><details><summary>Technical details</summary><pre style="white-space:pre-wrap;word-break:break-word;font-size:10px">'+E(r.error)+'</pre></details>':''}${r.url?(isCurrentRender(r)?`<div class="player-shell"><video controls playsinline class="reference-video" src="${r.url}"></video><a class="player-download" href="${r.url}?download=1" download title="Download this MP4">↓ Download MP4</a></div><a class="download" href="${r.url}?download=1">↓ Download current MP4</a> <a class="download" href="${r.url.replace(/\.mp4$/,'.srt')}?download=1">↓ Separate SRT</a>`:`<details><summary>Previous MP4 — does not include current settings</summary><p class="small">This is an earlier render, not the current timeline. Render again to include your changes.</p><div class="player-shell"><video controls playsinline class="reference-video" src="${r.url}"></video><a class="player-download" href="${r.url}?download=1" download title="Download this MP4">↓ Download MP4</a></div><a class="download" href="${r.url}?download=1">↓ Download previous MP4</a> <a class="download" href="${r.url.replace(/\.mp4$/,'.srt')}?download=1">↓ Previous SRT</a></details>`):''}<div class="notice">Review snapshots and media provenance remain in this production’s folder. Footage is never pulled in from another production automatically.</div></section></div>`}
+let pendingStrictExport=null;
+async function openStrictCutCheck(exportRequest){if(!P)return;const id=P.id;pendingStrictExport=exportRequest;$('#plan-title').textContent='Per-shot strict cut check';$('#plan-body').innerHTML='<p>Checking decoded source frames and every shot. Long files can take time…</p>';if(!$('#plan-dialog').open)$('#plan-dialog').showModal();try{if(strictStatus.key===strictKey()&&strictStatus.state!=='checking')strictStatus.key=null;const status=ensureStrictStatus();const r=status.state==='not_required'?{required:false,errors:[]}:status.report||await status.promise;if(P?.id!==id)return;if(exportRequest&&r.required)exportRequest.strict_checked_version=r.checked_version;if(!r.required){$('#plan-body').innerHTML='<p>No production script is attached to this storyboard; strict script cut checks do not apply.</p>';if(exportRequest)await submitStrictExport();return}if(r.mode==='documentary-cue-groups'){renderDocumentaryCueCutCheck(r);return}const clock=v=>v==null?'—':(v/1000).toFixed(6)+' s',deviation=v=>v==null?'—':(v>=0?'+':'')+v.toFixed(3)+' ms';$('#plan-body').innerHTML=`<p><strong>Strict frame-indexed cuts · 30 fps output.</strong> Nearest source and output frame boundaries are used; when a shot is short by up to one output frame, one verified source frame may be added after the snapped OUT. That frame may also appear at the next cut. Exact half-frame ties, variable or unverified timestamps, and other incompatible durations block export. Source frame rates are converted to 30 fps without changing playback speed. The table shows planned frame boundaries; the browser source preview is not frame-accurate. Full content, identity and rights still require human review.</p><p>${r.errors.length?`<strong>${r.errors.length} blocking issue(s).</strong>`:'Timing checks passed.'} ${r.adjustments?.length?`${r.adjustments.length} one-frame source OUT adjustment(s) are listed below.`:''}</p><div class="strict-table-scroll"><table class="strict-table"><thead><tr><th>Shot / source</th><th>Script IN → OUT</th><th>Strict planned IN → OUT (exclusive)</th><th>IN / OUT deviation</th><th>Narration script → placed</th><th>Result</th></tr></thead><tbody>${r.shots.map(x=>`<tr><td>${E(x.shot)}<br>${E(x.file||'Missing filename')}${x.source_fps?' · '+E(x.source_fps)+' fps':''}<br>Assigned: ${E(x.assigned_file||'Unassigned')}${x.photo?'':'<br>Saved IN: '+clock(x.saved_in_ms)}</td><td>${x.photo?'Photo · N/A':clock(x.script_in_ms)+' → '+clock(x.script_out_ms)}</td><td>${x.photo?'Static image · N/A':clock(x.placed_in_ms)+' → '+clock(x.placed_out_ms)}</td><td>${x.photo?'N/A':deviation(x.in_deviation_ms)+' / '+deviation(x.out_deviation_ms)}</td><td>${clock(x.timeline_script_in_ms)} → ${clock(x.timeline_script_out_ms)}<br>Placed: ${clock(x.timeline_placed_in_ms)} → ${clock(x.timeline_placed_out_ms)}</td><td>${x.errors.length?x.errors.map(E).join('<br>'):'Timing pass'}${(x.adjustments||[]).map(a=>'<br>'+E(a)).join('')}</td></tr>`).join('')}</tbody></table></div>${r.errors.filter(x=>!r.shots.some(s=>x.startsWith(s.shot+':'))).map(x=>`<p class="notice warn">${E(x)}</p>`).join('')}${r.errors.length?'<p><button type="button" onclick="playReviewTimeline()">▶ Play review timeline instead</button></p>':''}${exportRequest?`<p><button type="button" class="button primary" onclick="submitStrictExport()" ${r.errors.length?'disabled':''}>Confirm checks and render ${exportRequest.final?'final':'review'}</button></p>`:''}`;}catch(e){$('#plan-body').innerHTML='<p class="notice warn">Could not verify strict cuts: '+E(e.message)+'</p>';}}
+function setScriptCaptionExport(enabled){exportScriptCaptions=!!enabled;renderProgram();renderExport();if($('#manage-dialog').open)renderManagement()}
+function renderDocumentaryCueCutCheck(r){
+ const time=ms=>ms==null?'—':(ms/1000).toFixed(3)+' s';
+ $('#plan-title').textContent='Documentary cue-shot cut check';
+ $('#plan-body').innerHTML=`<p><strong>${r.shots.length} cue shots · ${r.physical_slots} preserved picture slots</strong> · ${E(r.fps||'unknown')} fps. Sound bites and approved gap footage remain inside their cue groups; no source range was merged, dropped or replaced. Original SRT timing remains unchanged.</p><p>${r.errors.length?`<strong>${r.errors.length} issue(s) need attention.</strong>`:'Picture timing checks passed.'} ${r.adjustments?.length?`${r.adjustments.length} explicitly approved one-frame adjustments apply to the final render.`:''}</p><div class="strict-table-scroll"><table class="strict-table"><thead><tr><th>Cue shot</th><th>Original SRT timing</th><th>Preserved picture slots · source IN → OUT</th></tr></thead><tbody>${r.shots.map(g=>`<tr><td>Shot ${E(g.cue)}<br>${E(g.text)}</td><td>${time(g.cue_start_ms)} → ${time(g.cue_end_ms)}</td><td>${g.slots.map(x=>`<div>Slot ${x.scene} · ${E(x.source_file||'Missing')} · ${time(x.source_in_ms)} → ${time(x.source_out_ms)}<br><small>${E(x.continuity||'')}</small></div>`).join('')}</td></tr>`).join('')}</tbody></table></div>${r.errors.map(x=>`<p class="notice warn">${E(x)}</p>`).join('')}`;
+}
+async function startExport(final){if(pictureScaleSaving||slotScalePreview){toast('Finish saving the scale adjustment before rendering.');return}await openStrictCutCheck({final,script_captions:exportScriptCaptions,srt_subtitles:editorCC,enhance_picture:enhancePicture})}
+async function submitStrictExport(){const request=pendingStrictExport;pendingStrictExport=null;if(!P||!request)return;try{P.render=(await api(`/api/projects/${P.id}/render`,'POST',request)).render;if($('#plan-dialog').open)$('#plan-dialog').close();renderProject();toast((request.final?'Final':'Review')+' export started.');}catch(e){toast(e.message);await openStrictCutCheck(null)}}
+async function cancelExport(){if(!confirm('Stop this export?'))return;await api(`/api/projects/${P.id}/cancel`,'POST',{});P=await api('/api/projects/'+P.id);renderProject()}
+document.addEventListener('input',e=>{if(e.target.closest('#brief-form,#scene-form,.asset-card,.bulk-reuse-rights'))dirty=true});window.addEventListener('beforeunload',e=>{if(dirty||uploading){e.preventDefault();e.returnValue=''}});
+// The familiar timeline editor owns navigation and startup (editor.js).
+
+
+function plannedMediaHTML(a){const plan=a.document_plan;if(a.derived_from)return `<div class="notice">Extracted from ${E(a.derived_from.source_file)} at ${(a.derived_from.requested_time_ms/1000).toFixed(3)}s. Preview frame only; identity/content still need review.</div>`;if(!plan||(!plan.cuts.length&&!plan.register.length))return '';return `<div class="notice"><strong>${E(plan.source_ids.join(' · '))}</strong> · ${plan.cuts.length} planned cuts${plan.youtube_urls.map((url,i)=>`<p><a href="${E(url)}" target="_blank" rel="noopener noreferrer">${E(plan.source_ids[i]||'Declared source')} — YouTube link</a></p>`).join('')}<br>${E(plan.register.map(r=>r.publisher+' — '+r.planned_content).join(' / '))}</div><details><summary>Inspect planned cuts (${plan.cuts.length})</summary>${plan.cuts.map(c=>`<div class="planned-cut"><b>Beat ${E(c.beat_id)} · ${(c.source_in_ms/1000).toFixed(3)}–${(c.source_out_ms/1000).toFixed(3)}s</b><p>${E(c.visible_content)}</p>${a.kind==='video'?`<button type="button" onclick="previewPlannedCut(this,${c.source_in_ms},${c.source_out_ms})">Play this source interval</button><img style="width:100%;margin-top:10px" loading="lazy" src="/api/projects/${P.id}/assets/${a.id}/planned-samples/${encodeURIComponent(c.beat_id)}" alt="IN, middle and final frame; visual match needs review">`:''}<p class="small">${E(c.review||'Picture match not independently verified.')}</p></div>`).join('')}</details>`}
+function previewPlannedCut(button,inside,outside){const video=button.closest('.asset-card').querySelector('video');if(!video)return;document.querySelectorAll('#manage-dialog video').forEach(v=>{if(v!==video)v.pause()});video.currentTime=inside/1000;video.ontimeupdate=()=>{if(video.currentTime>=outside/1000){video.pause();video.ontimeupdate=null}};video.play().catch(e=>toast(e.message))}
+
+function assetIsUsed(a){return (P?.scenes||[]).some(s=>s.asset_id===a.id||(P?.assets||[]).some(child=>child.id===s.asset_id&&child.derived_from?.asset_id===a.id))}
+
+function flowHTML(){const f=P?.picture_flow,fnn=f?.narration,s=P?.flow_summary?.picture?.counts||{},n=P?.flow_summary?.cut_flow||{},review=P?.flow_review||[];
+if(!f)return '';
+const counts=[['Untouched',s.already_inside_one_shot||0],['Slid inside a shot',s.slid_inside_a_shot||0],['Far slide · review',s.slid_far_inside_a_shot||0],['Continued a take',s.continued_running_take||0],['Jump cut',s.jump_cut_within_shot||0],['No single shot fits',s.no_single_shot_fits||0]].filter(x=>x[1]);
+return `<div class="card"><h3>Narration & footage flow</h3><p>Every picture beat is checked against the decoded shots of its own source, and every cut against the decoded pauses in the uploaded narration. Requested source moments are bent onto continuous footage; the narration, SRT wording and total duration never move.</p>
+<div class="inline">${counts.map(([label,value])=>`<span class="badge">${E(label)} · ${value}</span>`).join('')}</div>
+${n.cuts?`<p><strong>${n.in_a_breath_after||0} of ${n.cuts} cuts</strong> now land in a breath (was ${n.in_a_breath_before||0}). ${n.moved||0} cuts moved by 0.35s or less to reach a breath; ${n.over_speech_after||0} cut on top of a spoken word.</p>`:''}
+${fnn&&fnn.decoded===false?`<p class="small">${E(fnn.reason||'Narration silences could not be decoded.')}</p>`:''}
+${review.length?`<details open><summary>${review.length} beat${review.length===1?'':'s'} need a human look</summary>${review.map(r=>`<p><strong>Scene ${r.scene} · ${E(r.asset)}</strong> — ${E(r.note||'')}<br><span class="small">Declared ${r.declared_in_s}s → ${r.conformed_in_s}s${r.shot?` · shot ${r.shot[0]}-${r.shot[1]}s`:''}${r.suggestions?.length?' · free footage of this length: '+r.suggestions.map(x=>E(x.asset)+' @'+x.start_s+'s').join(', '):''}</span></p>`).join('')}</details>`:'<p class="small">No beat needed a far slide. Every declared moment that could stay put did.</p>'}
+<p class="small"><a class="download-link" href="/api/projects/${P.id}/flow-audit?download=1">↓ Flow audit CSV</a></p></div>${flowHTML()}</div>`}
+
+function sourceMatchingHTML(){
+ const rows=P.source_match_report||[];if(!rows.length)return '';
+ const gaps=rows.filter(r=>!['matched','selected'].includes(r.status));
+ const uploads=P.assets.filter(a=>a.kind==='video'&&!a.derived_from&&!a.reserve);
+ return `<div class="card"><h3>Resolve script filenames</h3>${gaps.length?'<p>Choose the correct uploaded video for each unmatched script filename, or upload the missing file. Do not guess based on similar names.</p>':'<p>All planned filenames have one selected upload. Build the storyboard to apply them.</p>'}
+ ${gaps.map(r=>`<label><strong>${E(r.source_file)}</strong> · ${r.beats} beats <select data-source-file="${E(r.source_file)}" onchange="linkMissingSource(this)"><option value="">Choose the correct upload…</option>${uploads.map(a=>`<option value="${E(a.id)}">${E(a.original_name||a.name)} · ${Number(a.duration||0).toFixed(1)}s</option>`).join('')}</select></label>`).join('')}
+ ${!gaps.length?`<p><button type="button" onclick="buildStoryboard()" ${buildDisabled()}>Build storyboard →</button></p>`:''}
+ </div>`
+}
+async function linkMissingSource(select){
+ const source=select.dataset.sourceFile,id=select.value;if(!id||!P)return;
+ const asset=P.assets.find(a=>a.id===id);if(!asset)return;
+ if(!confirm(`Use ${asset.original_name||asset.name} for ${source} in the production script?`)){select.value='';return}
+ try{P=await api(`/api/projects/${P.id}/source-bindings`,'POST',{source_file:source,asset_id:id});renderProject();toast('Source linked. Resolve remaining names, then build the storyboard.')}catch(e){select.value='';toast(e.message)}
+}
+function sourceBindingHTML(a){if(a.kind!=='video'||a.derived_from)return '';const linked=Object.entries(P.source_bindings||{}).filter(([name,id])=>id===a.id).map(([name])=>name);return `<div class="notice"><p class="small">Upload copy: ${E(a.id.slice(0,8))} · ${Number(a.duration||0).toFixed(3)}s${linked.length?' · Selected for '+E(linked.join(', ')):''}</p><button type="button" onclick="bindScriptSource('${E(a.id)}')">Use this upload for script matching</button></div>`}
+async function bindScriptSource(id){if(!leave())return;const a=P.assets.find(a=>a.id===id);if(!a)return;const name=prompt('Which script filename should use this uploaded copy? Example: S01.mp4. Original upload: '+a.original_name,a.original_name||a.name);if(!name?.trim())return;try{P=await api(`/api/projects/${P.id}/source-bindings`,'POST',{source_file:name.trim(),asset_id:id});renderProject();toast('Source linked. Rebuild the storyboard to apply it. Original uploads were not deleted.')}catch(e){toast(e.message)}}
+
+
+async function removeAsset(id){
+ if(!P||!leave())return;
+ const asset=P.assets.find(a=>a.id===id);if(!asset)return;
+ const derived=P.assets.filter(a=>a.derived_from?.asset_id===id),ids=new Set([id,...derived.map(a=>a.id)]);
+ const affected=P.scenes.filter(s=>ids.has(s.asset_id)).length;
+ const impact=(affected?` ${affected} storyboard scene(s) will become unassigned and need review.`:'')+(derived.length?` ${derived.length} extracted frame(s) will also be removed.`:'');
+ if(!confirm(`Remove ${asset.original_name||asset.name} from this project? The project copy and its local analysis report will be deleted.${impact} Your original computer file and existing exports are not deleted.`))return;
+ try{P=await api(`/api/projects/${P.id}/assets/${id}`,'DELETE',{confirm:true,confirm_used:true});renderProject();await list();toast(P.removal_warnings?.length?P.removal_warnings.join(' '):'File removed from this project.')}catch(e){toast(e.message)}
+}
+async function removeInput(kind){
+ if(!P||!leave())return;
+ const label={voiceover:'narration',srt:'SRT',production_script:'production script'}[kind];if(!label)return;
+ const impact=P.scenes.length?' Existing scene approvals will be reset; review or rebuild the storyboard.':'';
+ const srtWarning=kind==='srt'&&P.scenes.length?' Export will be blocked until an SRT is imported and the storyboard is rebuilt.':'';
+ if(!confirm(`Remove the ${label} from this project? The project copy${kind==='voiceover'?' and its local analysis report':''} will be deleted.${impact}${srtWarning} Your original computer file and existing exports are not deleted.`))return;
+ try{P=await api(`/api/projects/${P.id}/inputs/${kind}`,'DELETE',{confirm:true,confirm_used:true});renderProject();await list();toast(P.removal_warnings?.length?P.removal_warnings.join(' '):'File removed from this project.')}catch(e){toast(e.message)}
+}
+
+async function prepareSmoothPreview(){if(!P||!leave())return;try{await api(`/api/projects/${P.id}/continuous-preview`,'POST',{});P=await api(`/api/projects/${P.id}`);renderProject();toast('Preparing a temporary smooth preview.');}catch(e){toast(e.message)}}
+
+
+// What changed when the SRT was replaced (srt_compare.py): the names-only SRT from
+// Prompt 6 must keep every number, time and other word of the exported original.
+function srtCompareHTML(c){
+ if(!c)return '';
+ const list=xs=>xs.slice(0,12).map(x=>`<li><s>${E(x.before||'—')}</s> → <strong>${E(x.after||'—')}</strong> <span class="small">(line${x.blocks.length===1?'':'s'} ${x.blocks.slice(0,8).join(', ')}${x.blocks.length>8?'…':''})</span></li>`).join('')+(xs.length>12?`<li class="small">and ${xs.length-12} more</li>`:'');
+ const timing=c.same_timing?`<p>✓ Same numbers and timings as ${E(c.previous_name)}.</p>`:`<p><strong>${c.timing_changes} subtitle${c.timing_changes===1?' has':'s have'} a different number or timing from ${E(c.previous_name)}.</strong> A names-only correction must keep every time exactly. Upload the original export again and ask for names only.</p>`;
+ const names=c.name_changes.length?`<p>Names corrected:</p><ul>${list(c.name_changes)}</ul>`:(c.other_changes.length?'':'<p>No words changed.</p>');
+ const other=c.other_changes.length?`<p><strong>Other wording changed too</strong>, not just names. Check these against your narration:</p><ul>${list(c.other_changes)}</ul>`:'';
+ const ok=c.same_timing&&!c.other_changes.length;
+ return `<div class="notice ${ok?'':'warn'}">${timing}${names}${other}</div>`;
+}
+
+// Project Health Check is read-only. It never builds, retimes or assigns footage.
+let projectHealthRequest = 0;
+async function loadProjectHealth(id){
+ const token = ++projectHealthRequest;
+ const panel = document.querySelector('#project-health-panel');
+ if(!panel || !P || P.id!==id) return;
+ try {
+  const r = await api(`/api/projects/${encodeURIComponent(id)}/health`);
+  if(token!==projectHealthRequest || P?.id!==id || panel!==document.querySelector('#project-health-panel'))return;
+  const s = r.summary || {};
+  const nonOk = (r.checks||[]).filter(x=>x.state==='review'||x.state==='waiting');
+  const short = nonOk.slice(0,3).map(x=>`<p class="small">${E(x.message)}</p>`).join('');
+  const extra = nonOk.length>3 ? `<details><summary>Show ${nonOk.length-3} more waiting/review items</summary>${nonOk.slice(3).map(x=>`<p class="small">${E(x.message)}</p>`).join('')}</details>` : '';
+  panel.className = 'notice' + (r.status==='review'?' warn':'');
+  panel.innerHTML = `<strong>Project health · ${E(r.status==='ready'?'Inputs present':r.status==='waiting'?'Waiting for files':'Review needed')}</strong>`+
+   `<p>${E(r.headline||'')}</p>`+
+   `<p class="small">${Number(s.beats||0)} Beats · ${Number(s.soundbites||0)} soundbites · ${Number(s.srt_cues||0)} SRT cues · ${Number(s.sources_ready||0)}/${Number(s.sources||0)} required videos present</p>`+
+   short + extra + `<p class="small">${E(r.note||'')}</p>`+
+   `<button type="button" class="btn-quiet" onclick="loadProjectHealth(P.id)">Recheck inputs</button>`;
+ } catch(e) {
+  if(token===projectHealthRequest && P?.id===id && panel===document.querySelector('#project-health-panel')){
+   panel.className='notice warn';panel.innerHTML=`<strong>Project health unavailable</strong><p>${E(e.message)}</p><button type="button" onclick="loadProjectHealth(P.id)">Retry</button>`;
+  }
+ }
+}
+
+// Independently encoded documentary review. The existing responsive browser monitor
+// remains available while the background job renders exact FFmpeg transitions.
+let matchedReviewPoll=null;
+async function refreshExportMatchedPreview(){
+ if(!P||!P.documentary_beat_review)return;
+ const id=P.id,el=document.getElementById('export-matched-preview-status');
+ if(!el)return;
+ try{
+  const state=await api(`/api/projects/${id}/documentary-review-preview`);
+  if(P?.id!==id||!document.getElementById('export-matched-preview-status'))return;
+  if(state.status==='ready'&&state.renderer==='export_matched_lowres'&&state.url){
+   el.innerHTML=`<div class="notice"><strong>Export-matched low-resolution preview ready.</strong><p>${E(state.detail||'')}</p><video class="reference-video" style="max-width:100%;max-height:420px" controls playsinline preload="metadata" src="${E(state.url)}"></video></div>`;
+   return;
+  }
+  el.textContent=state.status==='error'?`Preview failed: ${state.detail||'unknown error'}`:
+    ['queued','running'].includes(state.status)?`Encoding exact review picture and sound: ${state.completed||0}/${state.total||'…'} segments`:
+    'No current export-matched preview. Use the button to render one.';
+  if(['queued','running'].includes(state.status)){clearTimeout(matchedReviewPoll);matchedReviewPoll=setTimeout(refreshExportMatchedPreview,1400)}
+ }catch(err){el.textContent='Cannot check the preview: '+err.message}
+}
+async function makeExportMatchedPreview(){
+ if(!P?.documentary_beat_review)return;
+ if(!leave())return;
+ try{await api(`/api/projects/${P.id}/documentary-review-preview`,'POST',{});
+     toast('Rendering a low-resolution export-matched preview.');
+     refreshExportMatchedPreview()}catch(err){toast(err.message)}
+}

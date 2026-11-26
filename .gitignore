@@ -1,0 +1,12 @@
+# Runtime data: uploads, renders, caches and per-case projects stay local
+projects/
+.venv/
+__pycache__/
+*.pyc
+.cache/
+
+# Media delivered for review stays out of the repository
+*.mp4
+
+# Machine-local settings (cache location, proxy quality)
+settings.json
