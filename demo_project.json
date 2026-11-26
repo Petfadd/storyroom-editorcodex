@@ -1,0 +1,53 @@
+{
+  "project_name": "The Offshore Scheme - Investigative Documentary",
+  "production_script": {
+    "text": "In January 2020, financial investigators uncovered a sophisticated money laundering operation spanning three continents. The scheme involved shell companies registered in the Cayman Islands, bank accounts in Switzerland, and business entities in Dubai. Through meticulous analysis of transaction records, three key findings emerged. First, over 2.5 million dollars was transferred through intermediary banks between March and June 2020. Second, the beneficial owners of these shell companies were never disclosed to regulatory authorities. Third, wire transfer records showed payments to individuals under criminal investigation in two separate countries. The chronological sequence of events reveals how the operation evolved. On March 15th, 2020, the first suspicious transfer of 500,000 dollars was made to an offshore account. By April 20th, three additional transactions totaling 1.2 million dollars were completed through different intermediary banks. In May 2020, internal auditors at the primary bank flagged the irregularities but took no action. By June 15th, federal investigators had opened a formal inquiry. However, key witness and former CFO John Smith stated under oath that no such transfers ever occurred. He claimed all transactions were legitimate business expenses approved by the board. Yet bank records clearly show payments of 1.2 million dollars to accounts controlled by the defendant within the same week these approvals were allegedly made. The contradictions between sworn testimony and documentary evidence formed the basis of the prosecution's case. After six months of investigation, federal prosecutors filed seven charges including fraud, money laundering, and conspiracy to defraud the United States. The trial lasted three weeks, with the jury deliberating for two days before reaching a verdict. The court found the defendant guilty on all charges. Sentencing of fifteen years in federal prison was imposed, with eligibility for parole after ten years served. The case established important precedents for prosecuting international financial crimes."
+  },
+  "srt": {
+    "duration_s": 420.0,
+    "blocks": [
+      {
+        "index": 1,
+        "start_ms": 5000,
+        "end_ms": 18000,
+        "text": "In January 2020, financial investigators uncovered a sophisticated money laundering operation spanning three continents. The scheme involved shell companies registered in the Cayman Islands, bank accounts in Switzerland, and business entities in Dubai."
+      },
+      {
+        "index": 2,
+        "start_ms": 22000,
+        "end_ms": 42000,
+        "text": "Through meticulous analysis of transaction records, three key findings emerged. First, over 2.5 million dollars was transferred through intermediary banks between March and June 2020. Second, the beneficial owners of these shell companies were never disclosed to regulatory authorities. Third, wire transfer records showed payments to individuals under criminal investigation in two separate countries."
+      },
+      {
+        "index": 3,
+        "start_ms": 48000,
+        "end_ms": 72000,
+        "text": "The chronological sequence of events reveals how the operation evolved. On March 15th, 2020, the first suspicious transfer of 500,000 dollars was made to an offshore account. By April 20th, three additional transactions totaling 1.2 million dollars were completed through different intermediary banks. In May 2020, internal auditors at the primary bank flagged the irregularities but took no action. By June 15th, federal investigators had opened a formal inquiry."
+      },
+      {
+        "index": 4,
+        "start_ms": 78000,
+        "end_ms": 95000,
+        "text": "However, key witness and former CFO John Smith stated under oath that no such transfers ever occurred. He claimed all transactions were legitimate business expenses approved by the board. Yet bank records clearly show payments of 1.2 million dollars to accounts controlled by the defendant within the same week these approvals were allegedly made."
+      },
+      {
+        "index": 5,
+        "start_ms": 100000,
+        "end_ms": 115000,
+        "text": "The contradictions between sworn testimony and documentary evidence formed the basis of the prosecution's case. After six months of investigation, federal prosecutors filed seven charges including fraud, money laundering, and conspiracy to defraud the United States."
+      },
+      {
+        "index": 6,
+        "start_ms": 120000,
+        "end_ms": 138000,
+        "text": "The trial lasted three weeks, with the jury deliberating for two days before reaching a verdict. The court found the defendant guilty on all charges. Sentencing of fifteen years in federal prison was imposed, with eligibility for parole after ten years served."
+      },
+      {
+        "index": 7,
+        "start_ms": 142000,
+        "end_ms": 150000,
+        "text": "The case established important precedents for prosecuting international financial crimes and holding corporate executives accountable for fraud."
+      }
+    ]
+  }
+}

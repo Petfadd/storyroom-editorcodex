@@ -66,7 +66,7 @@ LIMITS = {
     'min_duration_s': 3.0,
     'max_duration_s': 45.0,
     'max_per_film': 12,
-    'min_spacing_s': 20.0,         # minimum gap between recommendations
+    'min_spacing_s': 5.0,          # minimum gap between recommendations
 }
 
 # -------------------------------------------------------------------- exclusions
@@ -634,15 +634,57 @@ def _extract_findings(text):
 
 
 def _extract_events(text):
-    """Pull date+event pairs from a block of text."""
+    """Pull date+event pairs from a block of text.
+
+    Handles dates in multiple formats:
+      - March 15th, 2020  (with ordinal suffix)
+      - March 15, 2020    (without ordinal)
+      - May 2020          (month + year, no day)
+    Also handles leading prepositions (On, By, In) and sentence boundaries.
+    """
     events = []
-    for m in re.finditer(
-            rf'(({_MONTHS})\s+\d{{1,2}}(?:,?\s+\d{{2,4}})?)\s*[,.]?\s*(.*?)(?=(?:{_MONTHS})\s+\d|\.|;|$)',
-            text, re.I):
-        date_part = m.group(1).strip()
-        event_part = m.group(3).strip().rstrip('.,')
+
+    # Primary: "On/By/In ... Month Day(st|nd|rd|th)?, Year? ... event"
+    _lead = r'(?:On|By|In|During|From|After|Before|Since|Until|As of)\s+'
+    _date_full = rf'{_lead}({_MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:,\s*)?(\d{{2,4}})?'
+    # Month + year only (no day)
+    _date_mo_yr = rf'{_lead}({_MONTHS})\s+(\d{{2,4}})'
+
+    def _event_text(after):
+        """Extract event text from after a date match."""
+        after = re.sub(r'^[,.]+\s*', '', after).strip()
+        # Take until next date marker or sentence end
+        m2 = re.search(rf'(?:{_MONTHS})\s+\d{{1,2}}|(?=[.?!]\s)', after)
+        return after[:m2.start()].strip().rstrip('.,;')[:140] if m2 else after[:140]
+
+    # Pass 1: full dates with day
+    for m in re.finditer(_date_full, text, re.I):
+        date_part = m.group(0).strip()
+        event_part = _event_text(text[m.end():])
         if event_part and len(event_part) > 5:
-            events.append({'date': date_part, 'event': event_part[:140]})
+            events.append({'date': date_part, 'event': event_part})
+
+    # Pass 2: month + year only (skip if already captured)
+    for m in re.finditer(_date_mo_yr, text, re.I):
+        full = m.group(0).strip()
+        num2 = int(m.group(2))
+        if num2 <= 31:
+            continue  # likely day, captured above
+        if any(full in e['date'] for e in events):
+            continue
+        event_part = _event_text(text[m.end():])
+        if event_part and len(event_part) > 5:
+            events.append({'date': full, 'event': event_part})
+
+    # Fallback: standalone date (without leading preposition)
+    if not events:
+        s = re.search(
+            rf'({_MONTHS})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s*,\s*\d{{2,4}})?(?![0-9])',
+            text, re.I)
+        if s:
+            after = text[s.end():].strip().rstrip('.,;')
+            events.append({'date': s.group(0), 'event': after[:140]})
+
     if not events:
         events = [{'date': 'Date TBD', 'event': text[:120]}]
     return events[:8]
@@ -663,20 +705,23 @@ def _extract_legal(text):
     """Pull charges, verdict, sentencing from a block of text."""
     charges = re.findall(
         r'\b(?:count (?:of|one|two|three|four|five)\s+[^.]{5,80}|'
-        r'charg(?:ed|e)?\s+(?:with\s+)?[^.]{5,80})', text, re.I)
+        r'charg(?:ed|es)?\s+(?:of|including|with)?\s*[^.]{5,80}|'
+        r'\b[\w]+\s+charges\s+(?:including|of|such as)\s*[^.]{5,120})', text, re.I)
     verdict_m = re.search(
-        r'\b(?:verdict:\s*[^.]+|found\s+(?:guilty|not guilty)[^.]*|'
-        r'acquitted[^.]*)', text, re.I)
+        r'((?:verdict:\s*[^.]+|found\s+\w+(?:\s+\w+){0,5}\s+(?:guilty|not guilty)[^.]*|'
+        r'acquitted[^.]*|verdict[^.]{5,80}))', text, re.I)
     sentence_m = re.search(
-        r'\b(sentenc(?:ed|ing)?\s+(?:to\s+)?[^.]+)', text, re.I)
+        r'((?:sentenc(?:ed|ing)\s+(?:to\s+|of\s+)?[^.]+))', text, re.I)
     court_m = re.search(
         r'\b((?:[A-Z][a-z]+\s+)?(?:County|District|Circuit|Supreme|Federal|'
         r'Appellate|Superior)\s+(?:Court|Tribunal))\b', text)
+    clean = [c.strip().rstrip('.') for c in charges[:5]]
     return {
         'court': (court_m.group(1) if court_m else ''),
-        'charges': [c.strip().rstrip('.') for c in charges[:5]] or ['Charges as filed'],
+        'charges': clean,
         'verdict': (verdict_m.group(1) if verdict_m else '').strip(),
         'sentencing': (sentence_m.group(1) if sentence_m else '').strip(),
+        '_charges_empty': not clean,
     }
 
 
@@ -825,22 +870,33 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
 
     MIN_TEMPLATE_SCORE = 10
 
-    # Pass 1: pick the BEST candidate for each template independently.
+    # Pass 1: pick the BEST candidate for each template.
+    # Instead of iterating templates in fixed order (which lets early templates
+    # steal high-scoring blocks from later ones), build all (template, candidate,
+    # score) triples and sort by score descending. Then greedily assign, ensuring
+    # each template and each candidate is used at most once. This maximises total
+    # signal across all picks.
+    scored_pairs = []
+    for cand in candidates:
+        for template_id in TEMPLATES:
+            s = cand['template_scores'].get(template_id, 0)
+            if s > 0:
+                scored_pairs.append((s, template_id, cand))
+    scored_pairs.sort(key=lambda x: x[0], reverse=True)
+
     picked = []
     seen_indices = set()
     seen_templates = set()
-    for template_id in TEMPLATES:
-        best_for_t = None
-        best_score = 0
-        for cand in candidates:
-            s = cand['template_scores'].get(template_id, 0)
-            if s > best_score and cand['index'] not in seen_indices:
-                best_score = s
-                best_for_t = cand
-        if best_for_t and best_score >= MIN_TEMPLATE_SCORE:
-            picked.append((template_id, best_for_t, best_score))
-            seen_indices.add(best_for_t['index'])
-            seen_templates.add(template_id)
+    for score, template_id, cand in scored_pairs:
+        if score < MIN_TEMPLATE_SCORE:
+            break
+        if template_id in seen_templates:
+            continue
+        if cand['index'] in seen_indices:
+            continue
+        picked.append((template_id, cand, score))
+        seen_indices.add(cand['index'])
+        seen_templates.add(template_id)
 
     # Pass 2: fill remaining templates with lower threshold, to ensure
     # diversity. A documentary usually has several distinct story beats
@@ -868,6 +924,7 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
     # Sort picked chronologically, then space them out by min_spacing_s.
     picked.sort(key=lambda x: x[1]['start_ms'])
     selected = []
+    qc_failures = []
     last_end = -LIMITS['min_spacing_s']
     for template_id, cand, score in picked:
         start_ms = cand['start_ms']
@@ -875,10 +932,44 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
         if start_ms < last_end + LIMITS['min_spacing_s'] * 1000:
             continue
         duration_s = max(LIMITS['min_duration_s'],
-                         min(LIMITS['max_duration_s'], (end_ms - start_ms) / 1000 + 2.0))
+                         min(LIMITS['max_duration_s'], (end_ms - start_ms) / 1000 + 0.5))
         start_s = max(0.0, start_ms / 1000 - 0.5)
         end_s = start_s + duration_s
         content = _propose_content(template_id, cand['text'])
+
+        # QC gate: editorial, visual, timing checks before surfacing.
+        from motion_qc import full_qc as qc_check
+        qc = qc_check(
+            text=cand['text'],
+            content=content,
+            template_id=template_id,
+            start_s=start_s,
+            end_s=end_s,
+            film_duration_s=film_duration_s,
+            context=cand.get('context', ''),
+        )
+        if not qc['pass']:
+            qc_failures.append({
+                'id': 'mg_qc_' + hashlib.sha256(
+                    f"{cand['index']}|{template_id}|{start_ms}".encode()).hexdigest()[:12],
+                'time_range': [round(start_s, 2), round(end_s, 2)],
+                'preview_text': cand['text'][:80] + ('...' if len(cand['text']) > 80 else ''),
+                'template_id': template_id,
+                'score': score,
+                'qc_reasons': qc['reasons'],
+            })
+            continue
+
+        # Composition layout selection based on content characteristics.
+        from motion_compositions import build_sequence_with_layout
+        composition_seq = build_sequence_with_layout(template_id, content,
+                                                      duration_s)
+        composition_meta = {
+            'layout': composition_seq.meta.get('layout', 'default'),
+            'content_summary': {k: v for k, v in composition_seq.meta.items() if k != 'layout'},
+            'title': composition_seq.title,
+        }
+
         reveal_timings = _compute_reveal_timings(template_id, content, duration_s)
         reason = _build_reason(template_id, cand)
         selected.append({
@@ -893,6 +984,12 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
             'reason': reason,
             'narration_passage': cand['text'],
             'reveal_timings': reveal_timings,
+            'composition': composition_meta,
+            'qc': {
+                'editorial': qc['editorial_reason'],
+                'visual': qc['visual_reason'],
+                'timing': qc['timing_reason'],
+            },
         })
         last_end = end_s * 1000
 
@@ -916,6 +1013,17 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
                              min(LIMITS['max_duration_s'], (end_ms - cand['start_ms']) / 1000))
             end_s = start_s + duration_s
             content = _propose_content(best_t, cand['text'])
+
+            # Fallback: composition layout still selected for visual variety.
+            from motion_compositions import build_sequence_with_layout
+            composition_seq = build_sequence_with_layout(best_t, content,
+                                                          duration_s)
+            composition_meta = {
+                'layout': composition_seq.meta.get('layout', 'default'),
+                'content_summary': {k: v for k, v in composition_seq.meta.items() if k != 'layout'},
+                'title': composition_seq.title,
+            }
+
             reveal_timings = _compute_reveal_timings(best_t, content, duration_s)
             reason = _build_reason(best_t, cand)
             fallback.append({
@@ -930,9 +1038,19 @@ def suggest_sequences(analysis, srt_blocks, film_duration_s):
                 'reason': reason,
                 'narration_passage': cand['text'],
                 'reveal_timings': reveal_timings,
+                'composition': composition_meta,
+                'qc': {
+                    'editorial': 'Fallback: not reviewed',
+                    'visual': 'Fallback: not reviewed',
+                    'timing': 'Fallback: relaxed',
+                },
             })
             last_end_fb = end_s * 1000
         return fallback
+
+    # Store QC failures in the analysis dict for UI transparency.
+    if qc_failures:
+        analysis['_qc_failures'] = qc_failures
 
     return selected
 

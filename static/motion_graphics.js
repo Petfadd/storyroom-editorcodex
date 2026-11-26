@@ -56,6 +56,16 @@
       }
       return;
     }
+    // Validate PID format (must be 16 hex chars)
+    if (!/^[a-f0-9]{16}$/.test(P.id)) {
+      const dialog = document.getElementById('motion-graphics-dialog');
+      if (dialog) {
+        dialog.showModal();
+        const body = document.getElementById('motion-graphics-body');
+        if (body) body.innerHTML = '<div class="mg-status error">Invalid project ID. Please reopen the project from the home page.</div>';
+      }
+      return;
+    }
     const dialog = document.getElementById('motion-graphics-dialog');
     if (!dialog) return;
     dialog.showModal();
@@ -72,7 +82,15 @@
       _state = await _fetchJSON(_url());
       _render();
     } catch (err) {
-      _body().innerHTML = '<div class="mg-status error">Could not load motion graphics: ' + _escape(String(err)) + '</div>';
+      const msg = String(err);
+      let userMsg = msg;
+      // Parse common backend errors
+      if (msg.includes('Production not found')) {
+        userMsg = 'This project was not found on disk. It may have been deleted or moved. Please return to the home page and reopen the project.';
+      } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+        userMsg = 'Could not connect to the Storyroom server. Is it still running?';
+      }
+      _body().innerHTML = '<div class="mg-status error">' + _escape(userMsg) + '</div>';
     }
   }
 
