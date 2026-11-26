@@ -125,8 +125,8 @@ class SettingsTest(unittest.TestCase):
 class AnalysisTest(unittest.TestCase):
     def test_detects_candidates_in_sample_script(self):
         analysis = mg.analyse_script(SAMPLE_SCRIPT, SAMPLE_SRT)
-        self.assertGreater(analysis['beats_total'], 0)
-        self.assertGreater(analysis['narration_beats'], 0)
+        self.assertGreater(analysis['blocks_total'], 0)
+        self.assertGreater(analysis['narration_blocks'], 0)
         self.assertIsInstance(analysis['candidates'], list)
         self.assertIsInstance(analysis['excluded'], list)
 

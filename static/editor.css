@@ -1421,3 +1421,27 @@
 .mg-analysis{font-size:11px;color:#aab4c2;margin-bottom:10px;padding:8px 12px;border:1px solid #2c323d;border-radius:6px;background:#0d1119}.mg-analysis b{color:#eef2f7}
 .head-motion-graphics{background:linear-gradient(135deg,#1a1a1d,#2d1f22);color:#f1f1ef;border:1px solid #4a2c2f}.head-motion-graphics:hover{background:linear-gradient(135deg,#2d1f22,#4a2c2f)}
 @media(max-width:900px){.mg-workspace{grid-template-columns:1fr}.mg-preview-panel{position:static}.mg-control-grid{grid-template-columns:1fr}}
+/* Motion graphics recommendation cards */
+.mg-recommendation{border:1px solid #2c323d;border-radius:8px;padding:14px;background:#10161f;margin-bottom:14px}
+.mg-recommendation .mg-rec-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.mg-rec-template{background:#2a1820;color:#f1a0a5;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.mg-rec-time{color:#aab4c2;font-size:11px;font-variant-numeric:tabular-nums}
+.mg-rec-score{color:#65daa6;font-size:10px;margin-left:auto}
+.mg-rec-passage,.mg-rec-heading,.mg-rec-body,.mg-rec-reason{margin-bottom:10px;padding:8px 10px;background:#0d1119;border-radius:5px}
+.mg-rec-passage small,.mg-rec-heading small,.mg-rec-body small,.mg-rec-reason small{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#6b7585;margin-bottom:4px}
+.mg-rec-passage p{margin:0;font-size:12px;color:#c0c3c9;line-height:1.4;font-style:italic}
+.mg-rec-heading b{font-size:13px;color:#f1f1ef}
+.mg-rec-body{font-size:11px;color:#c0c3c9}
+.mg-rec-finding,.mg-rec-event{padding:3px 0;border-bottom:1px solid #1e2530}
+.mg-rec-finding small,.mg-rec-event small{color:#6b7585;font-size:10px;font-variant-numeric:tabular-nums}
+.mg-rec-verified{color:#65daa6;margin-bottom:6px}
+.mg-rec-conflicting{color:#f4bd56}
+.mg-rec-charge{padding:2px 0}
+.mg-rec-verdict,.mg-rec-sentence{margin-top:6px}
+.mg-rec-reason p{margin:0;font-size:11px;color:#9ca7b6;line-height:1.4}
+.mg-rec-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.mg-rec-actions button{padding:5px 12px;font-size:10px;letter-spacing:.06em;text-transform:uppercase;border-radius:4px;border:1px solid #333b47;background:#0e1218;color:#eef2f7;cursor:pointer}
+.mg-rec-actions button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.mg-rec-actions button.danger{color:#f87171;border-color:#7f1d1d}
+.mg-rec-actions button:hover{background:#1e2530}
+.mg-rec-actions button.primary:hover{opacity:.9}

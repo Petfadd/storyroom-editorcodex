@@ -1,11 +1,16 @@
 """Intelligent Cinematic Motion Graphics Engine.
 
 Non-destructive kinetic typography layer for investigative documentaries. The engine
-reads the full production script and narration SRT, identifies context-appropriate
-passages (Act 3/4/5/6), and proposes narration-synchronised motion graphics sequences.
+reads the narration SRT and production script, understands narrative context, and
+proposes narration-synchronised motion graphics sequences where they genuinely
+improve storytelling.
+
 Four context-aware templates (Investigative Findings, Chronological Timeline,
-Contradictory Statements, Legal Outcome) produce genuinely animated per-frame renders
-driven by Pillow, composited into the film by FFmpeg as a separate overlay layer.
+Contradictory Statements, Legal Outcome) produce genuinely animated per-frame
+renders driven by Pillow, composited into the film by FFmpeg as a separate
+overlay layer.
+
+No Acts or chapters are required. The engine analyses the narration itself.
 
 Rules that matter
   * The feature is optional and disabled by default. Nothing runs until the user
@@ -28,11 +33,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Iterable
 
-VERSION = 1
+VERSION = 2
 TEMPLATES = ('investigative_findings', 'chronological_timeline',
              'contradictory_statements', 'legal_outcome')
 DEFAULTS = {
@@ -60,39 +66,37 @@ LIMITS = {
     'min_duration_s': 3.0,
     'max_duration_s': 45.0,
     'max_per_film': 12,
+    'min_spacing_s': 20.0,         # minimum gap between recommendations
 }
 
-# Contextual exclusion: narration passages whose purpose makes a motion graphic
-# inappropriate. Patterns are matched against the beat's spoken narration and the
-# beat's visual direction / continuity note.
-_EXCLUDE_PATTERNS = (
+# -------------------------------------------------------------------- exclusions
+# Passages whose purpose makes a motion graphic inappropriate. Only the block's
+# OWN text is checked (not surrounding context). Patterns are specific enough
+# to avoid excluding ordinary documentary narration.
+
+_EXCLUSION_PATTERNS = [
+    # Cold opens / teasers
     re.compile(r'\b(?:cold open|teaser)\b', re.I),
+    # Victim / family emotional content (specific phrases)
     re.compile(r'\b(?:victim(?:\'s)? (?:mother|father|sister|brother|daughter|son|family|loved))\b', re.I),
     re.compile(r'\b(?:family (?:interview|statement|tribute|grief|mourning))\b', re.I),
+    re.compile(r'\b(?:in loving memory|remembering|tribute|memorial)\b', re.I),
+    # Strong emotional language (specific words only)
+    re.compile(r'\b(?:heart-?wrenching|devastat(?:ing|ed)|griev(?:ing|ed))\b', re.I),
+    # Witness testimony (authentic footage should remain)
     re.compile(r'\b(?:witness (?:testif|statement|account|describ))\b', re.I),
+    # Police / official briefings
     re.compile(r'\b(?:police (?:briefing|report|press|statement|chief))\b', re.I),
+    # Courtroom soundbites
     re.compile(r'\b(?:courtroom (?:sound|audio|recording|gavel))\b', re.I),
-    re.compile(r'\b(?:tribute|memorial|remembering|in loving memory)\b', re.I),
-    re.compile(r'\b(?:in closing|final thoughts|thank you for watch)\b', re.I),
+    # CTA sequences
     re.compile(r'\b(?:subscribe|like and (?:share|comment)|hit the bell|call to action)\b', re.I),
-    re.compile(r'\b(?:emotional|heart-?wrenching|devastat(?:ing|ed)|griev(?:ing|ing))\b', re.I),
-)
-
-# Contextual inclusion hints per act. The engine combines these with beat structure
-# to score candidate passages; no single keyword alone places a graphic.
-_ACT_HINTS = {
-    3: (r'\b(?:timeline|chronolog|sequence|before|after|days? later|weeks? later|hours? later)\b',
-        r'\b(?:then|next|subsequently|following|prior to)\b'),
-    4: (r'\b(?:investigat|discover|uncover|detective|inquir|examin)\b',
-        r'\b(?:found|revealed|learned|determined|concluded)\b'),
-    5: (r'\b(?:evidence|discrepanc|contradic|inconsisten|finding|turning point)\b',
-        r'\b(?:verified|confirmed|documented|proved|showed)\b'),
-    6: (r'\b(?:charg|indict|verdict|sentenc|convict|acquitt|guilt|plea)\b',
-        r'\b(?:court|judge|jury|trial|prosecut|defen[cs]e)\b'),
-}
+    # Emotional closings (specific phrases)
+    re.compile(r'\b(?:in closing|final thoughts|thank you for watch)\b', re.I),
+]
 
 
-# --------------------------------------------------------------------- settings
+# -------------------------------------------------------------------- settings
 
 def settings(project):
     """The project's motion graphics settings with defaults filled in."""
@@ -221,110 +225,375 @@ def _validate_sequence(seq):
         out['design'] = {k: v for k, v in seq['design'].items() if k in DEFAULTS['design']}
     if 'narration_binding' in seq and isinstance(seq['narration_binding'], list):
         out['narration_binding'] = copy.deepcopy(seq['narration_binding'])
+    if 'reason' in seq and isinstance(seq['reason'], str):
+        out['reason'] = seq['reason']
+    if 'reveal_timings' in seq and isinstance(seq['reveal_timings'], dict):
+        out['reveal_timings'] = seq['reveal_timings']
     return out
 
 
-# --------------------------------------------------------------------- analysis
+# ---------------------------------------------------------------- text analysis
+
+# Each function below returns a score 0..100. The total is the weighted sum.
+
+_MONTHS = ('january|february|march|april|may|june|july|august|september|'
+           'october|november|december')
+
+def _is_excluded(text, context=''):
+    """True when the block's OWN text matches an exclusion pattern.
+
+    Context is NOT checked here: a block about a contradiction that happens to
+    sit next to emotional content should still be eligible for a graphic. The
+    surrounding context is used only for scoring, never for exclusion.
+    """
+    return any(p.search(text) for p in _EXCLUSION_PATTERNS)
+
+
+def _count_dates(text):
+    """Count distinct date references (month + year, or full date)."""
+    return len(re.findall(
+        rf'(?:{_MONTHS})\s+\d{{1,2}}(?:,?\s+\d{{2,4}})?', text, re.I))
+
+
+def _count_facts(text):
+    """Count distinct factual statements (sentences with concrete content)."""
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    concrete = [s for s in sentences
+                if re.search(r'\b(?:was|were|is|are|had|has|found|showed|revealed|'
+                             r'uncovered|identified|reported|stated|charged|testified)\b',
+                             s, re.I)]
+    return len(concrete)
+
+
+def _count_names(text):
+    """Count capitalised multi-word names (people, places, organisations)."""
+    return len(re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', text))
+
+
+def _count_legal_terms(text):
+    """Count legal-domain terms."""
+    return len(re.findall(
+        r'\b(?:court|judge|jury|verdict|guilty|not guilty|charges?|indict(?:ment|ed)|'
+        r'sentenc(?:e|ed|ing)?|convict(?:ion|ed)?|acquit(?:ted|tal)?|plea(?:d|s)?|'
+        r'trial|prosecut(?:ion|or)?|defen[cs]e|defendant|attorney|lawyer|'
+        r'warrant|arrest|bail|parole|probation|appeal)\b', text, re.I))
+
+
+def _count_evidence_terms(text):
+    """Count investigation / evidence terms."""
+    return len(re.findall(
+        r'\b(?:evidence|finding|clue|fact|proof|forensic|dna|fingerprint|'
+        r'witness|suspect|detective|investigat(?:ion|or|ed)?|uncover(?:ed|s)?|'
+        r'reveal(?:ed|s)?|discover(?:ed|y)?|examined|analys(?:ed|is)|'
+        r'phone (?:records?|data|calls?)|surveillance|footage|video|audio|'
+        r'document(?:ed|s)?|records?|statements?|reports?)\b', text, re.I))
+
+
+def _count_timeline_terms(text):
+    """Count time-sequence markers."""
+    return len(re.findall(
+        r'\b(?:then|after(?:wards)?|before|following|subsequently|later|'
+        r'earlier|prior to|next|meanwhile|in the (?:meantime|aftermath)|'
+        r'days? later|weeks? later|months? later|years? later|'
+        r'(?:morning|afternoon|evening|night|midnight))\b', text, re.I))
+
+
+def _count_contrast_terms(text):
+    """Count contrast / contradiction markers."""
+    return len(re.findall(
+        r'\b(?:however|but|yet|nevertheless|instead|on the other hand|'
+        r'contrary (?:to|)|discrepanc(?:y|ies)?|conflict(?:ing)?|'
+        r'inconsisten(?:t|cy|cies)?|did.?not match|did not agree|'
+        r'although|despite|even though|nonetheless|whereas)\b', text, re.I))
+
+
+def _count_enumeration(text):
+    """Count enumerated items (first/second/third..., 'several pieces')."""
+    enumerations = len(re.findall(
+        r'\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|'
+        r'one|two|three|four|five|six|seven|eight|nine|ten)\s+'
+        r'(?:finding|piece|fact|evidence|item|clue|statement|count|charge|'
+        r'witness|person|element|detail|point)\b', text, re.I))
+    # Also detect "several", "multiple" + noun
+    enumerations += len(re.findall(
+        r'\b(?:several|multiple|a number of|many)\s+'
+        r'(?:pieces?|items?|facts?|findings?|evidence|elements?|clues?)\b',
+        text, re.I))
+    return enumerations
+
+
+def _information_density(text):
+    """How information-rich is this block? 0..1 normalised."""
+    dates = _count_dates(text)
+    facts = _count_facts(text)
+    names = _count_names(text)
+    nums = len(re.findall(r'\b\d+(?:st|nd|rd|th)?\b', text))
+    clauses = text.count(',') + text.count(';') + len(re.findall(r'\band\b|\bor\b', text, re.I))
+    words = len(text.split())
+    if words < 5:
+        return 0.0
+    raw = dates * 3 + facts * 2 + names * 2 + nums * 1.5 + clauses * 0.5
+    return min(1.0, raw / max(10, words * 0.25))
+
+
+def _is_emotional_or_generic(text):
+    """True when a block reads as filler or pure emotion with no concrete facts."""
+    emotional = re.search(
+        r'\b(?:sad|happy|angry|upset|crying|tears|joy|sorrow|grief|'
+        r'difficult|hard|tough|challenging|beautiful|wonderful|amazing|'
+        r'incredible|unbelievable|shocking|surprising)\b', text, re.I)
+    generic = re.search(
+        r'^(?:the (?:story|case|investigation) (?:of|about|began|continues|'
+        r'went on|unfolded|developed)|it was (?:a|the)|this is (?:the|a)|'
+        r'(?:everyone|people|they) (?:know|knew|said|felt|thought))\b',
+        text, re.I)
+    return bool(emotional or generic)
+
+
+# ------------------------------------------------------- per-template scoring
+
+def _score_findings(text, context):
+    """Score Investigative Findings template fit."""
+    score = 0
+    enumerations = _count_enumeration(text)
+    evidence_terms = _count_evidence_terms(text)
+    facts = _count_facts(text)
+    info_density = _information_density(text)
+
+    # Strong signal: enumerated findings (3+ items listed)
+    if enumerations >= 3:
+        score += 60
+    elif enumerations == 2:
+        score += 40
+    elif enumerations == 1:
+        score += 20
+
+    # Medium signal: multiple concrete facts in one block
+    if facts >= 3:
+        score += 25
+    elif facts >= 2:
+        score += 15
+
+    # Context signal: surrounded by investigation content
+    if re.search(
+        r'\b(?:investigation|detective|evidence|finding|clue|suspect|'
+        r'uncovered|discovered|revealed|examined)\b', context, re.I):
+        score += 15
+
+    # Information density boost
+    if info_density >= 0.6:
+        score += 10
+
+    # Penalty: emotional or generic language
+    if _is_emotional_or_generic(text):
+        score = score // 3
+
+    return min(score, 100)
+
+
+def _score_timeline(text, context):
+    """Score Chronological Timeline template fit."""
+    score = 0
+    dates = _count_dates(text)
+    timeline_markers = _count_timeline_terms(text)
+
+    # Strong signal: multiple dates in one block
+    if dates >= 3:
+        score += 70
+    elif dates == 2:
+        score += 55
+    elif dates == 1:
+        score += 25
+
+    # Medium signal: time-sequence markers
+    if timeline_markers >= 3:
+        score += 25
+    elif timeline_markers >= 2:
+        score += 15
+    elif timeline_markers == 1:
+        score += 5
+
+    # Context: surrounded by chronological content
+    if re.search(
+        r'\b(?:timeline|chronolog|sequence|progression|series of events|'
+        r'(?:january|february|march|april|may|june|july|august|september|'
+        r'october|november|december))\b', context, re.I):
+        score += 10
+
+    # Penalty: emotional or generic language
+    if _is_emotional_or_generic(text):
+        score = score // 3
+
+    return min(score, 100)
+
+
+def _score_contradiction(text, context):
+    """Score Contradictory Statements template fit."""
+    score = 0
+    contrast_markers = _count_contrast_terms(text)
+
+    # Strong signal: contrast marker present
+    if contrast_markers >= 1:
+        score += 40
+
+    # Medium signal: both a claim and a counter-claim present
+    claim = re.search(
+        r'\b(?:report(?:ed|s)?|stated?|claimed?|testified|said|alleged|'
+        r'asserted|declared|official|officials?)\b', text, re.I)
+    counter = re.search(
+        r'\b(?:however|but|instead|contrary|discrepanc|conflict|inconsisten|'
+        r'otherwise|did not|didn\'t|failed to|not|no)\b', text, re.I)
+    if claim and counter:
+        score += 30
+
+    # Context: previous blocks make claims that this block refutes
+    if re.search(
+        r'\b(?:report(?:ed|s)?|stated?|claimed?|testified|said)\b',
+        context, re.I):
+        score += 15
+
+    # Information density boost (complex contradiction)
+    if _information_density(text) >= 0.5:
+        score += 10
+
+    # Penalty: emotional or generic language
+    if _is_emotional_or_generic(text):
+        score = score // 3
+
+    return min(score, 100)
+
+
+def _score_legal(text, context):
+    """Score Legal Outcome template fit."""
+    score = 0
+    legal_terms = _count_legal_terms(text)
+
+    # Strong signal: multiple legal terms (full legal passage)
+    if legal_terms >= 4:
+        score += 60
+    elif legal_terms >= 3:
+        score += 45
+    elif legal_terms >= 2:
+        score += 30
+    elif legal_terms == 1:
+        score += 15
+
+    # Specific legal concepts carry extra weight
+    if re.search(r'\b(?:verdict|guilty|not guilty|acquitted?|convict(?:ed|ion))\b', text, re.I):
+        score += 15
+    if re.search(r'\b(?:sentenc(?:e|ed|ing)?|years? (?:in|of)|prison|jail|'
+                 r'life (?:in|sentence)|death (?:penalty|sentence))\b', text, re.I):
+        score += 15
+    if re.search(r'\b(?:charg(?:es?|ed|ing)|indict(?:ment|ed)|count (?:of|one|two|three))\b', text, re.I):
+        score += 10
+
+    # Context: surrounded by legal content
+    if re.search(
+        r'\b(?:court|judge|jury|verdict|trial|prosecut|defen[cs]e|'
+        r'attorney|lawyer|charges?|sentenc)\b', context, re.I):
+        score += 10
+
+    # Penalty: emotional or generic language
+    if _is_emotional_or_generic(text):
+        score = score // 3
+
+    return min(score, 100)
+
+
+_SCORERS = {
+    'investigative_findings': _score_findings,
+    'chronological_timeline': _score_timeline,
+    'contradictory_statements': _score_contradiction,
+    'legal_outcome': _score_legal,
+}
+
+
+def _build_context(blocks, index, window=2):
+    """Return the text of up to `window` blocks on each side of index."""
+    start = max(0, index - window)
+    end = min(len(blocks), index + window + 1)
+    return ' '.join(
+        (blocks[i].get('text') or blocks[i].get('spoken_narration') or '')
+        for i in range(start, end)
+        if i != index
+    )
+
+
+# ------------------------------------------------------------- main analysis
 
 def analyse_script(script_text, srt_blocks):
-    """Read the full script and SRT; return structured context for placement.
+    """Read the full SRT and script; return structured context for placement.
 
-    Returns a dict with:
-      - acts: list of {act, beats: [...], start_ms, end_ms}
-      - candidates: ranked passages suitable for motion graphics
-      - excluded: passages that were considered but rejected
-    The analysis never modifies the script or SRT; it only reads them.
+    No Acts or chapters required. The engine analyses narration context directly.
     """
     script_text = script_text or ''
-    srt_blocks = srt_blocks or []
-    # 1. Act structure: derived from Act/Chapter markers in the script text,
-    #    falling back to narration-clock thirds when none are present.
-    acts = _detect_acts(script_text)
-    # 2. Beat-level scoring: each narration beat is scored for template suitability.
+    blocks = list(srt_blocks or [])
+
+    # Also try to extract narration from a script text when no SRT is provided.
+    if not blocks:
+        blocks = _beats_from_script_text(script_text)
+
     candidates = []
     excluded = []
-    beats = []
-    try:
-        from documentary_beats import read_beats
-        beats = read_beats(script_text)
-    except Exception:
-        # Fallback: derive beat-like segments from the SRT blocks so the engine
-        # still works when the production script is in a non-standard format or
-        # missing some Beat fields.
-        beats = _beats_from_srt(srt_blocks)
-        if not beats:
-            # Last resort: extract narration segments from the raw script text.
-            beats = _beats_from_script_text(script_text)
-    for beat in beats:
-        if beat.get('kind') != 'narration':
-            continue
-        narration = (beat.get('spoken_narration') or '').strip()
-        if not narration:
-            continue
-        # 3. Hard exclusions
-        if _is_excluded(beat):
-            excluded.append({'reason': 'excluded_passage',
-                             'beat': beat.get('label'),
-                             'narration_in_ms': beat.get('narration_in_ms'),
-                             'narration_out_ms': beat.get('narration_out_ms')})
-            continue
-        act = _beat_act(beat, acts)
-        scores = _score_templates(narration, act, beat)
-        if not scores:
-            continue
-        candidates.append({
-            'beat': beat.get('label'),
-            'act': act,
-            'narration_in_ms': beat.get('narration_in_ms'),
-            'narration_out_ms': beat.get('narration_out_ms'),
-            'spoken_narration': narration,
-            'template_scores': scores,
-        })
-    # 4. Rank candidates: prefer higher template score, mid-act (not first/last beat).
-    candidates.sort(key=lambda c: (-max(c['template_scores'].values()),
-                                   abs(c['act'] - 4.5)))
-    return {'acts': acts, 'candidates': candidates[:20],
-            'excluded': excluded[:20], 'beats_total': len(beats),
-            'narration_beats': len([b for b in beats if b.get('kind') == 'narration'])}
 
-
-def _beats_from_srt(srt_blocks):
-    """Derive narration-like beats from SRT blocks when the script cannot be parsed.
-
-    Each SRT block becomes a pseudo-beat with the block's text as the spoken
-    narration and the block's timestamps as the narration clock. This lets the
-    engine still analyse documentaries whose production scripts are incomplete
-    or use a non-standard format.
-    """
-    beats = []
-    for block in srt_blocks:
-        if not isinstance(block, dict):
-            continue
-        text = (block.get('text') or '').strip()
+    for i, block in enumerate(blocks):
+        text = (block.get('text') or block.get('spoken_narration') or '').strip()
         if not text:
             continue
-        beats.append({
-            'label': str(block.get('number', len(beats) + 1)),
-            'kind': 'narration',
-            'narration_in_ms': int(block.get('start_ms', 0)),
-            'narration_out_ms': int(block.get('end_ms', 0)),
-            'spoken_narration': text,
+        context = _build_context(blocks, i, window=2)
+        combined = text + ' ' + context
+
+        # Hard exclusions
+        if _is_excluded(text, context):
+            excluded.append({
+                'reason': 'excluded_passage',
+                'index': i,
+                'start_ms': int(block.get('start_ms', 0)),
+                'end_ms': int(block.get('end_ms', 0)),
+                'text': text[:80],
+            })
+            continue
+
+        # Per-template scoring
+        scores = {}
+        for template_id, scorer in _SCORERS.items():
+            s = scorer(text, context)
+            if s > 0:
+                scores[template_id] = s
+
+        if not scores:
+            continue
+
+        best_template = max(scores, key=scores.get)
+        candidates.append({
+            'index': i,
+            'text': text,
+            'start_ms': int(block.get('start_ms', 0)),
+            'end_ms': int(block.get('end_ms', 0)),
+            'template_scores': scores,
+            'best_template': best_template,
+            'best_score': scores[best_template],
+            'information_density': _information_density(text),
         })
-    return beats
+
+    # Sort by best score descending, breaking ties by information density.
+    candidates.sort(key=lambda c: (-c['best_score'], -c['information_density']))
+
+    return {
+        'candidates': candidates[:30],
+        'excluded': excluded[:20],
+        'blocks_total': len(blocks),
+        'narration_blocks': len([b for b in blocks if (b.get('text') or b.get('spoken_narration') or '').strip()]),
+    }
 
 
 def _beats_from_script_text(script_text):
-    """Extract narration segments from raw script text as a last-resort fallback.
-
-    Looks for Spoken Narration: fields or Beat blocks with VOICE OVER type and
-    extracts the spoken text. Timestamps are estimated from beat ordering.
-    """
-    beats = []
-    # Try to find "Spoken Narration: ..." fields in Beat blocks.
+    """Extract narration segments from raw script text as a last-resort fallback."""
+    blocks = []
     beat_pattern = re.compile(
         r'(?:^|\n)\s*Beat:\s*(\d+).*?(?:^|\n)\s*Type:\s*([^\n]+)(.*?)(?=(?:^|\n)\s*Beat:|\Z)',
         re.S | re.I)
-    narration_pattern = re.compile(r'(?:^|\n)\s*Spoken Narration:\s*([^\n]+)', re.I)
+    narration_pattern = re.compile(r'(?:^|\n)\s*(?:Spoken Narration|Narration):\s*([^\n]+)', re.I)
     for m in beat_pattern.finditer(script_text or ''):
         label = m.group(1)
         typ = m.group(2).strip().upper()
@@ -335,244 +604,294 @@ def _beats_from_script_text(script_text):
         text = nm.group(1).strip() if nm else ''
         if not text:
             continue
-        # Estimate timestamps: each beat gets 8 seconds, sequential.
-        idx = len(beats)
-        beats.append({
-            'label': label,
-            'kind': 'narration',
-            'narration_in_ms': idx * 8000,
-            'narration_out_ms': (idx + 1) * 8000,
-            'spoken_narration': text,
+        idx = len(blocks)
+        blocks.append({
+            'number': int(label),
+            'start_ms': idx * 8000,
+            'end_ms': (idx + 1) * 8000,
+            'text': text,
         })
-    return beats
+    return blocks
 
 
-def _is_excluded(beat):
-    """True when the beat matches any hard exclusion pattern."""
-    text = ' '.join(str(beat.get(k) or '') for k in
-                    ('spoken_narration', 'visual_direction', 'continuity_note', 'type'))
-    return any(p.search(text) for p in _EXCLUDE_PATTERNS)
+# --------------------------------------------------------- proposal generation
+
+def _extract_findings(text):
+    """Pull individual findings from a block of text."""
+    findings = []
+    # Pattern: "The Nth was..." or "N: ..." or short declarative sentences
+    for m in re.finditer(
+            r'(?:the\s+(?:first|second|third|fourth|fifth|sixth)\s+(?:was|is|showed|revealed|found)\s+)?'
+            r'((?:a|an|the|one)\s+[^.]{8,120})', text, re.I):
+        findings.append(m.group(1).strip().rstrip('.'))
+    # Fallback: split by sentences, keep concrete ones
+    if not findings:
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text)
+                     if len(s.strip()) > 8
+                     and re.search(r'\b(?:was|were|found|showed|revealed|had|has)\b', s, re.I)]
+        findings = sentences[:5]
+    return findings[:6] or [text[:200]]
 
 
-def _detect_acts(script_text):
-    """Find Act boundaries in the script text.
-
-    Recognises `Act 3`, `ACT III`, `Chapter 3`, `### Act 3` markers.
-    Returns a list of {act, start_line} sorted by position, with implied end = next start.
-    """
-    acts = []
-    seen = set()
-    roman = {'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7, 'VIII': 8}
-    for m in re.finditer(r'(?:^|\n)\s*(?:#+\s*)?(?:Act|ACT|Chapter|CHAPTER)\s*([IVXLC\d]+)[^\n]*',
-                         script_text, re.I):
-        token = m.group(1).upper()
-        try:
-            num = int(token) if token.isdigit() else roman[token]
-        except (KeyError, ValueError):
-            continue
-        if num in seen or not 3 <= num <= 6:
-            continue
-        seen.add(num)
-        acts.append({'act': num, 'start_pos': m.start()})
-    acts.sort(key=lambda a: a['start_pos'])
-    return acts
+def _extract_events(text):
+    """Pull date+event pairs from a block of text."""
+    events = []
+    for m in re.finditer(
+            rf'(({_MONTHS})\s+\d{{1,2}}(?:,?\s+\d{{2,4}})?)\s*[,.]?\s*(.*?)(?=(?:{_MONTHS})\s+\d|\.|;|$)',
+            text, re.I):
+        date_part = m.group(1).strip()
+        event_part = m.group(3).strip().rstrip('.,')
+        if event_part and len(event_part) > 5:
+            events.append({'date': date_part, 'event': event_part[:140]})
+    if not events:
+        events = [{'date': 'Date TBD', 'event': text[:120]}]
+    return events[:8]
 
 
-def _beat_act(beat, acts):
-    """Which act a beat falls into (3-6), or 0 if outside any relevant act."""
-    start_ms = beat.get('narration_in_ms') or 0
-    # Use beat ordering as a rough proxy when acts are not explicitly marked:
-    # divide the narration clock into six acts and return the act number.
-    if not acts:
-        # Fallback: approximate act from narration clock position.
-        out_ms = beat.get('narration_out_ms') or start_ms
-        # Default: unknown; let the caller decide.
-        return 0
-    # Find the last act whose start_pos is before this beat's position in script text.
-    # Since beats don't carry character offsets, use narration_in_ms as a proxy:
-    # assign acts by dividing total narration duration by act count.
-    return acts[-1]['act'] if acts else 0
+def _extract_contradiction(text):
+    """Split a contradiction block into verified vs conflicting parts."""
+    contrast_markers = re.compile(
+        r'\b(?:however|but|yet|nevertheless|instead|contrary to|'
+        r'although|despite|on the other hand)\b', re.I)
+    parts = contrast_markers.split(text, maxsplit=1)
+    verified = parts[0].strip()[:240] if parts else text[:240]
+    conflicting = parts[1].strip()[:240] if len(parts) > 1 else ''
+    return verified, conflicting
 
 
-def _score_templates(narration, act, beat):
-    """Return {template_id: score} for templates that match this narration."""
-    scores = {}
-    for template_id in TEMPLATES:
-        score = _template_score(narration, act, beat, template_id)
-        if score > 0:
-            scores[template_id] = score
-    return scores
-
-
-def _template_score(narration, act, beat, template_id):
-    """Score one template against one narration passage (0..100)."""
-    score = 0
-    # Act affinity: each template strongly prefers one or two acts.
-    act_affinity = {
-        'investigative_findings': (4, 5),
-        'chronological_timeline': (3, 4),
-        'contradictory_statements': (5,),
-        'legal_outcome': (6,),
+def _extract_legal(text):
+    """Pull charges, verdict, sentencing from a block of text."""
+    charges = re.findall(
+        r'\b(?:count (?:of|one|two|three|four|five)\s+[^.]{5,80}|'
+        r'charg(?:ed|e)?\s+(?:with\s+)?[^.]{5,80})', text, re.I)
+    verdict_m = re.search(
+        r'\b(?:verdict:\s*[^.]+|found\s+(?:guilty|not guilty)[^.]*|'
+        r'acquitted[^.]*)', text, re.I)
+    sentence_m = re.search(
+        r'\b(sentenc(?:ed|ing)?\s+(?:to\s+)?[^.]+)', text, re.I)
+    court_m = re.search(
+        r'\b((?:[A-Z][a-z]+\s+)?(?:County|District|Circuit|Supreme|Federal|'
+        r'Appellate|Superior)\s+(?:Court|Tribunal))\b', text)
+    return {
+        'court': (court_m.group(1) if court_m else ''),
+        'charges': [c.strip().rstrip('.') for c in charges[:5]] or ['Charges as filed'],
+        'verdict': (verdict_m.group(1) if verdict_m else '').strip(),
+        'sentencing': (sentence_m.group(1) if sentence_m else '').strip(),
     }
-    if act in act_affinity.get(template_id, ()):
-        score += 40
-    elif act == 0:
-        score += 5  # neutral, may still match via keywords
-    # Keyword evidence (secondary; act affinity dominates)
-    hint_groups = _ACT_HINTS.get(act, ())
-    for pattern in hint_groups:
-        if re.search(pattern, narration, re.I):
-            score += 15
-    # Template-specific cues
-    if template_id == 'investigative_findings' and re.search(
-            r'\b(?:three|four|five|key|main|primary|central)\s+(?:findings?|points?|facts?)\b',
-            narration, re.I):
-        score += 25
-    if template_id == 'chronological_timeline' and re.search(
-            r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d',
-            narration, re.I):
-        score += 30
-    if template_id == 'contradictory_statements' and re.search(
-            r'\b(?:however|but|instead|contrary|discrepanc|conflict|inconsisten)\b',
-            narration, re.I):
-        score += 25
-    if template_id == 'legal_outcome' and re.search(
-            r'\b(?:charg|count|verdict|sentenc|guilty|not guilty|convict|acquit)\b',
-            narration, re.I):
-        score += 30
-    return min(score, 100)
 
 
-def suggest_sequences(analysis, srt_blocks, film_duration_s):
-    """Convert analysis candidates into concrete sequence proposals.
-
-    Returns at most LIMITS['max_per_film'] suggestions, each bound to narration
-    timestamps and annotated with the best-fit template and proposed content.
-    """
-    if not analysis.get('candidates'):
-        return []
-    # 1. De-duplicate: avoid overlapping suggestions within 15 seconds of each other.
-    selected = []
-    last_end = -15_000
-    for cand in analysis['candidates']:
-        if cand['narration_in_ms'] < last_end + 15_000:
-            continue
-        best_template = max(cand['template_scores'], key=cand['template_scores'].get)
-        if cand['template_scores'][best_template] < 40:
-            continue
-        # Extend the window slightly before/after for breathing room.
-        start_ms = max(0, cand['narration_in_ms'] - 500)
-        end_ms = cand['narration_out_ms'] + 1500
-        duration_s = (end_ms - start_ms) / 1000
-        if duration_s < LIMITS['min_duration_s']:
-            end_ms = start_ms + int(LIMITS['min_duration_s'] * 1000)
-            duration_s = LIMITS['min_duration_s']
-        if duration_s > LIMITS['max_duration_s']:
-            end_ms = start_ms + int(LIMITS['max_duration_s'] * 1000)
-            duration_s = LIMITS['max_duration_s']
-        content = _propose_content(best_template, cand)
-        selected.append({
-            'id': 'mg_' + hashlib.sha256(
-                f"{cand['beat']}|{best_template}|{start_ms}".encode()).hexdigest()[:12],
-            'template': best_template,
-            'start_s': round(start_ms / 1000, 3),
-            'end_s': round(end_ms / 1000, 3),
-            'content': content,
-            'score': cand['template_scores'][best_template],
-            'beat': cand['beat'],
-            'act': cand['act'],
-        })
-        last_end = end_ms
-        if len(selected) >= LIMITS['max_per_film']:
-            break
-    return selected
-
-
-def _propose_content(template_id, cand):
-    """Build an initial content payload for a template from the candidate beat."""
-    narration = cand['spoken_narration']
+def _compute_reveal_timings(template_id, content, duration_s):
+    """Generate per-element reveal timings for a sequence."""
+    timings = {'elements': []}
+    t = 0.0
     if template_id == 'investigative_findings':
-        return _propose_findings(narration)
+        timings['elements'].append({'id': 'kicker', 'at_s': 0.0, 'dur_s': 0.45})
+        t = 0.45
+        timings['elements'].append({'id': 'title', 'at_s': t, 'dur_s': 0.55})
+        t += 0.45
+        timings['elements'].append({'id': 'divider', 'at_s': t, 'dur_s': 0.55})
+        t += 0.35
+        findings = content.get('findings') or []
+        per = max(0.6, (duration_s - t - 1.0) / max(1, len(findings)))
+        for i in range(len(findings)):
+            timings['elements'].append({'id': f'finding_{i}', 'at_s': t, 'dur_s': per})
+            t += per
+    elif template_id == 'chronological_timeline':
+        timings['elements'].append({'id': 'kicker', 'at_s': 0.0, 'dur_s': 0.45})
+        t = 0.40
+        timings['elements'].append({'id': 'timeline_line', 'at_s': t, 'dur_s': duration_s * 0.75})
+        events = content.get('events') or []
+        per = max(0.8, (duration_s - t - 1.0) / max(1, len(events)))
+        for i in range(len(events)):
+            timings['elements'].append({'id': f'event_{i}_date', 'at_s': t + 0.1, 'dur_s': 0.4})
+            timings['elements'].append({'id': f'event_{i}_desc', 'at_s': t + 0.35, 'dur_s': 0.5})
+            t += per
+    elif template_id == 'contradictory_statements':
+        timings['elements'].append({'id': 'kicker', 'at_s': 0.0, 'dur_s': 0.45})
+        t = 0.35
+        timings['elements'].append({'id': 'verified_label', 'at_s': t, 'dur_s': 0.4})
+        timings['elements'].append({'id': 'verified_body', 'at_s': t + 0.15, 'dur_s': 0.6})
+        t += 1.0
+        timings['elements'].append({'id': 'divider', 'at_s': t, 'dur_s': 0.55})
+        t += 0.40
+        timings['elements'].append({'id': 'conflicting_label', 'at_s': t, 'dur_s': 0.4})
+        timings['elements'].append({'id': 'conflicting_body', 'at_s': t + 0.15, 'dur_s': 0.6})
+    elif template_id == 'legal_outcome':
+        timings['elements'].append({'id': 'kicker', 'at_s': 0.0, 'dur_s': 0.45})
+        t = 0.30
+        timings['elements'].append({'id': 'charges_label', 'at_s': t, 'dur_s': 0.4})
+        t += 0.30
+        charges = content.get('charges') or []
+        per = max(0.4, (duration_s - t - 3.0) / max(1, len(charges) + 2))
+        for i in range(len(charges)):
+            timings['elements'].append({'id': f'charge_{i}', 'at_s': t, 'dur_s': per})
+            t += per
+        timings['elements'].append({'id': 'verdict_divider', 'at_s': t, 'dur_s': 0.5})
+        t += 0.35
+        timings['elements'].append({'id': 'verdict', 'at_s': t + 0.15, 'dur_s': 0.55})
+        t += 0.60
+        if content.get('sentencing'):
+            timings['elements'].append({'id': 'sentencing', 'at_s': t + 0.15, 'dur_s': 0.5})
+    return timings
+
+
+def _build_reason(template_id, cand):
+    """Human-readable reason why this block was recommended."""
+    text = cand['text']
+    density = cand.get('information_density', 0)
+    scores = cand['template_scores']
+    reasons = []
+    if template_id == 'investigative_findings':
+        if _count_enumeration(text) >= 2:
+            reasons.append(f'block enumerates {_count_enumeration(text)} evidence items that benefit from structured visual presentation')
+        if _count_facts(text) >= 3:
+            reasons.append(f'contains {_count_facts(text)} concrete factual statements')
+        if density >= 0.5:
+            reasons.append('high information density rewards visual organisation')
+    elif template_id == 'chronological_timeline':
+        dates = _count_dates(text)
+        if dates >= 2:
+            reasons.append(f'presents {dates} distinct dates that a timeline clarifies for the viewer')
+        if _count_timeline_terms(text) >= 2:
+            reasons.append('sequential time markers benefit from a visual chronology')
+    elif template_id == 'contradictory_statements':
+        if _count_contrast_terms(text) >= 1:
+            reasons.append('explicit contrast marker signals two competing claims')
+        claim = bool(re.search(r'\b(?:report|stated|claimed|testified|said)\b', text, re.I))
+        counter = bool(re.search(r'\b(?:however|but|instead|contrary|discrepanc)\b', text, re.I))
+        if claim and counter:
+            reasons.append('contains both a claim and a counter-claim, ideal for side-by-side display')
+    elif template_id == 'legal_outcome':
+        lt = _count_legal_terms(text)
+        if lt >= 3:
+            reasons.append(f'legal passage with {lt} legal-domain terms warrants structured presentation')
+        if re.search(r'\b(?:verdict|guilty|not guilty)\b', text, re.I):
+            reasons.append('verdict language carries high documentary significance')
+    if not reasons:
+        reasons.append('narration passage fits the selected template context')
+    return '. '.join(reasons).capitalize() + '.'
+
+
+def _propose_content(template_id, text):
+    """Build content payload for a template from the block text."""
+    if template_id == 'investigative_findings':
+        findings = _extract_findings(text)
+        title = 'Key Findings'
+        m = re.search(r'(?:the|a)\s+([a-z ]{4,30})\s+(?:was|were|is|are|showed)', text, re.I)
+        if m:
+            title = m.group(1).strip().title()[:60] or 'Key Findings'
+        return {
+            'kicker': 'Investigative Findings',
+            'title': title,
+            'findings': findings,
+        }
     if template_id == 'chronological_timeline':
-        return _propose_timeline(narration)
+        return {'title': 'Chronology', 'events': _extract_events(text)}
     if template_id == 'contradictory_statements':
-        return _propose_contradiction(narration)
+        v, c = _extract_contradiction(text)
+        return {
+            'title': 'Discrepancy',
+            'verified': v,
+            'verified_label': 'Verified',
+            'conflicting': c or 'See evidence below',
+            'conflicting_label': 'Conflicting',
+        }
     if template_id == 'legal_outcome':
-        return _propose_legal(narration)
+        return {'title': 'Legal Outcome', **_extract_legal(text)}
     return {}
 
 
-def _propose_findings(narration):
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', narration) if len(s.strip()) > 8]
-    findings = sentences[:5] if len(sentences) >= 2 else [narration[:200]]
-    return {
-        'kicker': 'Investigative Findings',
-        'title': _extract_title(narration) or 'Key Findings',
-        'findings': findings,
-    }
+# ----------------------------------------------------------- suggestions
+
+def suggest_sequences(analysis, srt_blocks, film_duration_s):
+    """Convert analysis candidates into concrete recommendations.
+
+    For each template, picks the BEST candidate (highest per-template score),
+    not the first one that happens to have a non-zero score. Templates whose
+    best candidate scores below MIN_TEMPLATE_SCORE are skipped.
+    """
+    candidates = analysis.get('candidates') or []
+    if not candidates:
+        return []
+
+    # Minimum per-template score to warrant a recommendation. Lower than this
+    # means the block has only weak keyword matches and does not genuinely
+    # benefit from a motion graphic.
+    MIN_TEMPLATE_SCORE = 30
+
+    # Pass 1: pick the BEST candidate for each template independently.
+    picked = []
+    seen_indices = set()
+    for template_id in TEMPLATES:
+        best_for_t = None
+        best_score = 0
+        for cand in candidates:
+            s = cand['template_scores'].get(template_id, 0)
+            if s > best_score and cand['index'] not in seen_indices:
+                best_score = s
+                best_for_t = cand
+        if best_for_t and best_score >= MIN_TEMPLATE_SCORE:
+            picked.append((template_id, best_for_t, best_score))
+            seen_indices.add(best_for_t['index'])
+
+    # Pass 2: fill remaining slots with the best-of-rest (any template).
+    # Ensures we get 2-5 diverse recommendations even when one template has
+    # no strong candidates.
+    for cand in candidates:
+        if len(picked) >= LIMITS['max_per_film']:
+            break
+        if cand['index'] in seen_indices:
+            continue
+        best_t = cand.get('best_template')
+        best_s = cand.get('best_score', 0)
+        if not best_t or best_s < MIN_TEMPLATE_SCORE:
+            continue
+        picked.append((best_t, cand, best_s))
+        seen_indices.add(cand['index'])
+
+    # Sort picked chronologically, then space them out by min_spacing_s.
+    picked.sort(key=lambda x: x[1]['start_ms'])
+    selected = []
+    last_end = -LIMITS['min_spacing_s']
+    for template_id, cand, score in picked:
+        start_ms = cand['start_ms']
+        end_ms = cand['end_ms']
+        if start_ms < last_end + LIMITS['min_spacing_s'] * 1000:
+            continue
+        duration_s = max(LIMITS['min_duration_s'],
+                         min(LIMITS['max_duration_s'], (end_ms - start_ms) / 1000 + 2.0))
+        start_s = max(0.0, start_ms / 1000 - 0.5)
+        end_s = start_s + duration_s
+        content = _propose_content(template_id, cand['text'])
+        reveal_timings = _compute_reveal_timings(template_id, content, duration_s)
+        reason = _build_reason(template_id, cand)
+        selected.append({
+            'id': 'mg_' + hashlib.sha256(
+                f"{cand['index']}|{template_id}|{start_ms}".encode()).hexdigest()[:12],
+            'template': template_id,
+            'start_s': round(start_s, 3),
+            'end_s': round(end_s, 3),
+            'content': content,
+            'score': score,
+            'information_density': cand.get('information_density', 0),
+            'reason': reason,
+            'narration_passage': cand['text'],
+            'reveal_timings': reveal_timings,
+        })
+        last_end = end_s * 1000
+
+    return selected
 
 
-def _propose_timeline(narration):
-    events = []
-    for m in re.finditer(
-            r'((?:January|February|March|April|May|June|July|August|September|'
-            r'October|November|December)\s+\d{1,2}(?:,?\s+\d{2,4})?)', narration, re.I):
-        # Find the rest of the sentence after the date as the event description.
-        tail = narration[m.end():].split('.')[0].strip().lstrip(', ')
-        events.append({'date': m.group(1).strip(), 'event': tail[:120] or 'Event'})
-    if not events:
-        events = [{'date': 'Date TBD', 'event': narration[:120]}]
-    return {'title': 'Chronology', 'events': events[:8]}
-
-
-def _propose_contradiction(narration):
-    parts = re.split(r'\b(?:however|but|instead|contrary to|discrepanc|conflict)\b',
-                     narration, flags=re.I, maxsplit=1)
-    verified = parts[0].strip()[:200] if parts else narration[:200]
-    conflicting = parts[1].strip()[:200] if len(parts) > 1 else ''
-    return {
-        'title': 'Discrepancy',
-        'verified': verified,
-        'verified_label': 'Verified',
-        'conflicting': conflicting or 'See evidence below',
-        'conflicting_label': 'Conflicting',
-    }
-
-
-def _propose_legal(narration):
-    charges = re.findall(r'\b(?:count of\s+[A-Z][^,.]+|charg(?:ed|e)?\s+with\s+[A-Z][^,.]+)', narration)
-    verdict = re.search(r'\b(verdict:\s*[^.]+|found\s+(?:guilty|not guilty)[^.]*|acquitted[^.]*)',
-                        narration, re.I)
-    sentence = re.search(r'\b(sentenc(?:ed|ing)?\s+to\s+[^.]+)', narration, re.I)
-    return {
-        'title': 'Legal Outcome',
-        'court': '',
-        'charges': [c.strip() for c in charges[:4]] or ['Charges as filed'],
-        'verdict': (verdict.group(1) if verdict else 'Verdict pending').strip(),
-        'sentencing': (sentence.group(1) if sentence else '').strip(),
-    }
-
-
-def _extract_title(narration):
-    """Pull a short headline from the narration; fall back to first sentence."""
-    m = re.search(r'\b(the\s+(?:evidence|investigation|findings?|timeline|record|facts?))\b',
-                  narration, re.I)
-    if m:
-        return m.group(1).title()
-    first = narration.split('.')[0].strip()
-    if 8 <= len(first) <= 80:
-        return first
-    return ''
-
+# ---------------------------------------------------------------- signature
 
 def signature(project):
     """Hash used to invalidate cached analysis when script/SRT change."""
-    mg = project.get('motion_graphics') or {}
     srt = project.get('srt') or {}
     blocks = (srt.get('blocks') if isinstance(srt, dict) else None) or []
     parts = [
         str((project.get('production_script') or {}).get('text', ''))[:200_000],
-        json.dumps(blocks[:200], sort_keys=True),
+        json.dumps(blocks[:200], sort_keys=True, default=str),
         str(project.get('updated', '')),
     ]
     return hashlib.sha256('|'.join(parts).encode()).hexdigest()[:24]
