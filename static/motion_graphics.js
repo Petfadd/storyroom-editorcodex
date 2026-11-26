@@ -24,12 +24,21 @@
   let _selectedId = null;
 
   function _pid() {
+    // Use the global project object P if available (like all other Storyroom modules)
+    if (typeof P !== 'undefined' && P && P.id) {
+      return P.id;
+    }
+    // Fallback: extract from URL pattern /editor/{pid}
     const m = (location.pathname || '').match(/\/editor\/([a-f0-9]{16})/);
     return m ? m[1] : null;
   }
 
   function _url(suffix) {
-    return '/api/projects/' + _pid() + '/motion-graphics' + (suffix || '');
+    const pid = _pid();
+    if (!pid) {
+      throw new Error('No project ID available. Please open a project first.');
+    }
+    return '/api/projects/' + pid + '/motion-graphics' + (suffix || '');
   }
 
   async function _fetchJSON(url, options) {
@@ -44,6 +53,16 @@
   // ---------- open / close ----------
 
   window.openMotionGraphics = async function openMotionGraphics() {
+    // Must have an active project (matches cinematic_graphics guard pattern).
+    if (!P || !P.id) {
+      const dialog = document.getElementById('motion-graphics-dialog');
+      if (dialog) {
+        dialog.showModal();
+        const body = document.getElementById('motion-graphics-body');
+        if (body) body.innerHTML = '<div class="mg-status error">Open a project before using motion graphics.</div>';
+      }
+      return;
+    }
     const dialog = document.getElementById('motion-graphics-dialog');
     if (!dialog) return;
     dialog.showModal();
