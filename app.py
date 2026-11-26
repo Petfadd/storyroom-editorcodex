@@ -983,6 +983,118 @@ def save_cinematic_graphics_settings(pid):
  return jsonify({'settings':settings,'project':public(p),'review_only':True})
 
 
+# --- Motion Graphics (Intelligent Cinematic Motion Graphics Engine) ------------
+
+@app.get('/api/projects/<pid>/motion-graphics')
+def motion_graphics_get(pid):
+ """Read-only motion graphics state: settings, catalogue, cached analysis."""
+ import motion_graphics as mg
+ p=snapshot(pid);settings=mg.settings(p)
+ analysis=None
+ cache_path=folder(pid)/'reviews'/'motion_graphics_analysis.json'
+ if cache_path.is_file():
+  try:analysis=json.loads(cache_path.read_text(encoding='utf-8'))
+  except (OSError,ValueError):analysis=None
+ return jsonify({'version':mg.VERSION,'settings':settings,'catalogue':mg.catalogue(p),
+                 'analysis':analysis,'signature':mg.signature(p)})
+
+
+@app.patch('/api/projects/<pid>/motion-graphics')
+@project_io_lock
+def motion_graphics_patch(pid):
+ """Save motion graphics settings (enable, mode, design, sequences)."""
+ import motion_graphics as mg
+ editable(pid);p=load(pid)
+ patch=request.get_json(silent=True) or {}
+ try:values=mg.validate_patch(patch)
+ except ValueError as error:raise BadRequest(str(error)) from error
+ current=p.get('motion_graphics') or {}
+ current.update(values);p['motion_graphics']=mg.settings(p)
+ save(p)
+ return jsonify({'settings':p['motion_graphics'],'project':public(p),
+                 'signature':mg.signature(p)})
+
+
+@app.post('/api/projects/<pid>/motion-graphics/analyse')
+@project_io_lock
+def motion_graphics_analyse(pid):
+ """Analyse the production script and SRT; return ranked placement suggestions.
+
+ This is the engine's context-aware placement pass. It never modifies narration,
+ footage or SRT; it reads them and proposes.
+ """
+ import motion_graphics as mg
+ editable(pid);p=load(pid)
+ script_text=(p.get('production_script') or {}).get('text','')
+ srt_blocks=(p.get('srt') or {}).get('blocks') or []
+ timeline=mg.analyse_script(script_text,srt_blocks)
+ # Estimate total film duration from scenes.
+ film_duration_s=sum((s.get('frame_out',0)-s.get('frame_in',0))/30 for s in p.get('scenes') or [])/1
+ suggestions=mg.suggest_sequences(timeline,srt_blocks,film_duration_s)
+ # Persist the analysis for the editor UI to display the rationale.
+ analysis={'signature':mg.signature(p),'generated':time.time(),
+           'summary':{'beats_total':timeline['beats_total'],
+                      'narration_beats':timeline['narration_beats'],
+                      'candidates':len(timeline['candidates']),
+                      'excluded':len(timeline['excluded']),
+                      'acts':[a['act'] for a in timeline['acts']]},
+           'candidates':timeline['candidates'][:10],
+           'excluded':timeline['excluded'][:10],
+           'suggestions':suggestions}
+ cache_dir=folder(pid)/'reviews';cache_dir.mkdir(parents=True,exist_ok=True)
+ (cache_dir/'motion_graphics_analysis.json').write_text(json.dumps(analysis,ensure_ascii=False),encoding='utf-8')
+ # Store suggestions so the user can accept them without re-analysing.
+ current=p.get('motion_graphics') or {}
+ current['suggestions']=suggestions;p['motion_graphics']=mg.settings(p);save(p)
+ return jsonify({'analysis':analysis,'suggestions':suggestions,'signature':mg.signature(p)})
+
+
+@app.post('/api/projects/<pid>/motion-graphics/preview')
+def motion_graphics_preview(pid):
+ """Render a lightweight preview MP4 of one sequence for the editor UI.
+
+ Runs in a background thread so the editor never blocks. Returns a status
+ object the UI can poll.
+ """
+ import motion_graphics as mg
+ import motion_render as mr
+ p=snapshot(pid);data=request.get_json(silent=True) or {}
+ seq_id=data.get('id') or ''
+ seqs=(p.get('motion_graphics') or {}).get('suggestions') or []
+ seqs=seqs+((p.get('motion_graphics') or {}).get('sequences') or [])
+ seq=next((s for s in seqs if s.get('id')==seq_id),None)
+ if not seq:raise NotFound('Sequence not found.')
+ settings=mg.settings(p)
+ design=seq.get('design') or settings.get('design') or mg.DEFAULTS['design']
+ # Lightweight preview: 640-wide, 15 fps.
+ from fractions import Fraction
+ width=640;height=max(2,int(width*9/16)//2*2)
+ fps=Fraction(15,1)
+ out_dir=folder(pid)/'.cache'/'motion-graphics-previews';out_dir.mkdir(parents=True,exist_ok=True)
+ out_path=out_dir/f'{seq_id}.mp4'
+ sig_path=out_dir/f'{seq_id}.sig'
+ import motion_templates as mt
+ sequence=mt.build_sequence(seq['template'],seq['content'],float(seq['end_s'])-float(seq['start_s']))
+ current_sig=mr.sequence_signature(sequence,design,fps,width,height)
+ if out_path.is_file() and sig_path.is_file() and sig_path.read_text(encoding='utf-8')==current_sig:
+  return jsonify({'url':f'/api/projects/{pid}/motion-graphics/preview/{seq_id}/stream','ready':True})
+ def _render():
+  try:
+   mr.preview_video(sequence,design,fps,width,height,out_path)
+   sig_path.write_text(current_sig,encoding='utf-8')
+  except Exception as exc:
+   sig_path.write_text('error:'+str(exc)[:200],encoding='utf-8')
+ threading.Thread(target=_render,daemon=True,name='mg-preview-'+seq_id).start()
+ return jsonify({'ready':False,'url':f'/api/projects/{pid}/motion-graphics/preview/{seq_id}/stream'})
+
+
+@app.get('/api/projects/<pid>/motion-graphics/preview/<seq_id>/stream')
+def motion_graphics_preview_stream(pid,seq_id):
+ root=folder(pid);path=root/'.cache'/'motion-graphics-previews'/f'{seq_id}.mp4'
+ if not path.is_file() or not path.is_relative_to(root.resolve()):raise NotFound('Preview not ready yet.')
+ return send_file(path,mimetype='video/mp4',conditional=True)
+
+
 @app.post('/api/projects/<pid>/transition-suggest')
 def suggest_transitions(pid):
  """Assign a transition to every boundary, each from that scene's own content.

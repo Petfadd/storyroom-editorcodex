@@ -522,24 +522,37 @@ def _render(root, project, sound_plan, destination, width, height, progress=lamb
                 input_label=current)
             if stk_steps:
                 current = 'stk'
+            # Motion graphics: non-destructive kinetic typography layer over the
+            # picture, cards, CTA and stickers. Disabled by default; nothing is
+            # drawn unless the user enables the feature for this project.
+            from motion_render import render_filters as mg_render_filters
+            mg_cache = {}
+            mg_first = stk_first + stk_inputs.count('-i') + cta_inputs.count('-i')
+            mg_inputs, mg_steps, mg_count = mg_render_filters(
+                project, root, width, height, rate, work, mg_first, between=(f0, f1),
+                cache=mg_cache, input_label=current)
+            if mg_steps:
+                current = 'mg'
             # The channel watermark is on every frame of the film, end to end: over the
-            # picture, cards and CTA, under captions and subtitles.
+            # picture, cards, CTA, stickers and motion graphics, under captions.
             from watermark import render_filters as wm_render_filters
+            wm_first = mg_first + mg_inputs.count('-i')
             wm_inputs, wm_steps = wm_render_filters(
-                project, root, width, height, rate, work, stk_first + stk_inputs.count('-i'), count, f0,
+                project, root, width, height, rate, work, wm_first, count, f0,
                 current, cache=watermark_cache)
-            if not (fades or captions or cards or cta_count or stk_count or wm_steps):
+            if not (fades or captions or cards or cta_count or stk_count or mg_steps or wm_steps):
                 return None
             shift = f'setpts=PTS+{f0}/({rate}*TB)'
             graph = ['[p]' + ','.join([shift] + fades + ['null']) + '[base]']
             if steps: graph += steps
             if cta_steps: graph += cta_steps
             if stk_steps: graph += stk_steps
+            if mg_steps: graph += mg_steps
             if wm_steps:
                 graph += wm_steps
                 current = 'wm'
             graph += ['[' + current + ']' + ','.join(captions + ['setpts=PTS-STARTPTS', 'format=yuv420p']) + '[out]']
-            return inputs + cta_inputs + stk_inputs + wm_inputs, graph, 'out'
+            return inputs + cta_inputs + stk_inputs + mg_inputs + wm_inputs, graph, 'out'
         # ---- The pieces: each encoded once, at delivery quality, side by side --------
         x264 = ['-c:v', 'libx264', '-preset', VIDEO_PRESET, '-bf', '0', '-crf', '20', '-threads', '2',
                 '-video_track_timescale', str(fps.numerator)]
